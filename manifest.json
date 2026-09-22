@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Auto Register Filler",
-  "version": "1.5.2",
-  "description": "自动填充注册表单，并为当前网站生成推广文案。",
+  "name": "AutoComment",
+  "version": "2.0.0",
+  "description": "使用你自己的 OpenRouter Key，批量为博客文章生成并提交评论。",
   "permissions": [
     "activeTab",
     "storage"
@@ -15,13 +15,19 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Auto Register Filler - 网站自动填表与推广文案助手"
+    "default_title": "AutoComment - 批量评论"
   },
   "options_page": "batch.html",
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["illegal-site-filter.js", "lib/submission-waiter.js", "content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "illegal-site-filter.js",
+        "lib/submission-waiter.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ]

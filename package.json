@@ -1,28 +1,10 @@
 {
-  "name": "auto-comment-backend",
-  "version": "1.0.0",
-  "description": "Auto Comment Filler Backend API",
-  "main": "server.js",
+  "name": "autocomment-extension",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Chrome extension that batch-generates blog comments with your own OpenRouter key",
   "scripts": {
-    "test": "node --test tests/*.test.js",
-    "start": "node server.js",
-    "dev": "node server.js",
-    "csv:export": "node scripts/run-csv-export.js",
-    "pm2:start": "pm2 start server.js --name auto-comment-api",
-    "pm2:stop": "pm2 stop auto-comment-api",
-    "pm2:restart": "pm2 restart auto-comment-api",
-    "pm2:logs": "pm2 logs auto-comment-api"
-  },
-  "dependencies": {
-    "alipay-sdk": "^4.14.0",
-    "better-sqlite3": "^11.6.0",
-    "dotenv": "^16.4.5",
-    "express": "^4.18.2",
-    "mysql2": "^3.11.0",
-    "papaparse": "^5.5.3"
-  },
-  "devDependencies": {
-    "pm2": "^5.3.0"
+    "test": "node --test tests/*.test.js"
   },
   "engines": {
     "node": ">=18.0.0"

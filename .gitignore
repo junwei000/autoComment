@@ -1,17 +1,7 @@
-# Local export helper files generated for private database exports.
-.gitignore
-/local_export_tools/
-
-# Generated CSV inventory for automatic paid fulfillment.
-/storage/csv-batches/
-
 # Local development dependencies and editor state.
 /node_modules/
 /.idea/
+.DS_Store
 
-# Generated extension bundles.
-/dist/*.zip
-/dist/auto-comment-plugin/
-
-# Local scratch files.
-/commit_msg.txt
+# Packaged extension archives.
+*.zip
