@@ -51,86 +51,40 @@
         gap: 6px;
       }
 
-      /* 上传区域 */
-      .upload-zone {
-        border: 2px dashed #d1d5db;
+      /* URL 输入 */
+      .url-input {
+        width: 100%;
+        min-height: 220px;
+        resize: vertical;
+        padding: 10px 12px;
+        border: 1px solid #d1d5db;
         border-radius: 10px;
-        padding: 32px 20px;
-        text-align: center;
-        cursor: pointer;
-        transition: border-color 0.2s, background-color 0.2s;
-        position: relative;
+        font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #111827;
+        white-space: pre;
+        overflow-wrap: normal;
+        overflow-x: auto;
       }
 
-      .upload-zone:hover,
-      .upload-zone.drag-over {
-        border-color: #2563eb;
-        background-color: #eff6ff;
-      }
+      .url-input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15); }
+      .url-input:disabled { background: #f9fafb; color: #6b7280; }
 
-      .upload-zone.has-file {
-        border-color: #059669;
-        background-color: #f0fdf4;
-      }
-
-      .upload-icon {
-        font-size: 36px;
-        margin-bottom: 8px;
-      }
-
-      .upload-text {
-        font-size: 14px;
-        color: #6b7280;
-        margin-bottom: 8px;
-      }
-
-      .upload-hint {
-        font-size: 12px;
-        color: #9ca3af;
-      }
-
-      input[type='file'] {
-        display: none;
-      }
-
-      .file-info {
-        display: none;
-        align-items: center;
-        gap: 10px;
-        margin-top: 10px;
-        padding: 10px 14px;
-        background: #f0fdf4;
-        border-radius: 8px;
-        border: 1px solid #bbf7d0;
-      }
-
-      .file-info.visible {
+      .url-input-bar {
         display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 10px;
       }
 
-      .file-name {
-        flex: 1;
-        font-size: 13px;
-        font-weight: 500;
-        color: #15803d;
-        word-break: break-all;
-      }
+      .url-line-counter { font-size: 12px; color: #6b7280; font-variant-numeric: tabular-nums; }
+      .url-line-counter[data-state="error"] { color: #b91c1c; font-weight: 600; }
 
-      .file-count {
-        font-size: 12px;
-        color: #15803d;
-        white-space: nowrap;
-      }
-
-      .file-remove {
-        font-size: 18px;
-        color: #9ca3af;
-        cursor: pointer;
-        line-height: 1;
-        padding: 2px 4px;
-      }
-
-      .file-remove:hover { color: #dc2626; }
+      .url-summary { margin-top: 8px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+      .url-summary:empty { display: none; }
+      .url-summary[data-state="ok"] { color: #047857; }
+      .url-summary[data-state="warn"] { color: #b45309; }
+      .url-summary[data-state="error"] { color: #b91c1c; }
 
       /* URL 预览 */
       .url-preview {
@@ -695,26 +649,25 @@
       </section>
 
       <div class="workspace-grid">
-      <!-- 文件上传区 -->
+      <!-- URL 输入区 -->
       <div class="card">
-        <div class="card-title">上传 CSV 文件</div>
-        <div class="upload-zone" id="uploadZone">
-          <div class="upload-icon">📂</div>
-          <div class="upload-text">拖拽 CSV 文件到此处，或点击选择文件</div>
-          <div class="upload-hint">支持 .csv 文件，建议不超过 5,000 行</div>
-          <input type="file" id="fileInput" accept=".csv" />
+        <label class="card-title" for="urlInput">待处理 URL</label>
+        <textarea
+          class="url-input"
+          id="urlInput"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="每行一个完整链接，最多 300 行，例如：&#10;https://blog.example.com/2024/05/some-post&#10;https://another.example.org/article/123"
+        ></textarea>
+        <div class="url-input-bar">
+          <button class="btn btn-primary" id="loadUrlsBtn" type="button">加载到待处理列表</button>
+          <span class="url-line-counter" id="urlLineCounter" aria-live="polite">0 / 300 行</span>
         </div>
-
-        <div class="file-info" id="fileInfo">
-          <span class="file-name" id="fileName"></span>
-          <span class="file-count" id="fileCount"></span>
-          <span class="file-remove" id="fileRemove" title="移除文件">×</span>
-        </div>
+        <div class="url-summary" id="urlSummary" role="status" aria-live="polite"></div>
 
         <div class="url-preview" id="urlPreview">
           <div class="url-preview-header">
             <span>待处理 URL 列表</span>
-            <span id="duplicateCount"></span>
           </div>
           <table>
             <thead>
@@ -729,8 +682,8 @@
         </div>
 
         <div class="hint" style="margin-top:10px">
-          只读取第一列 URL，其余列忽略。可使用 url 表头，也可直接从第一行开始填写地址。<br />
-          无协议地址自动补充 https://；无效地址跳过，重复地址自动去重。
+          每行一个以 http:// 或 https:// 开头的完整链接，空行忽略，重复链接自动去重。<br />
+          重新加载会替换待处理列表，并清空上一批的任务记录。
         </div>
       </div>
 
@@ -924,7 +877,6 @@
 
     </div>
 
-    <script src="lib/papaparse.min.js"></script>
     <script src="lib/batch-utils.js"></script>
     <script src="illegal-site-filter.js"></script>
     <script src="batch.js"></script>

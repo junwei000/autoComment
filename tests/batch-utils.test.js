@@ -2,48 +2,45 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  parseUrlCsv,
+  parseUrlLines,
+  MAX_URL_LINES,
   normalizeUrl,
   getDisplayDomain
 } = require('../lib/batch-utils');
 
-test('parseUrlCsv skips an optional case-insensitive url header', () => {
-  const result = parseUrlCsv('URL\nexample.com\nhttps://www.example.org/path');
-
+test('parseUrlLines takes one full URL per line, trimming blanks and whitespace', () => {
+  const result = parseUrlLines('  https://a.example/post-1  \r\n\n\nhttp://b.example/p?x=1#c\n');
   assert.deepEqual(result, {
-    items: ['https://example.com/', 'https://www.example.org/path'],
-    invalidCount: 0,
-    duplicateCount: 0
+    items: ['https://a.example/post-1', 'http://b.example/p?x=1#c'],
+    lineCount: 2,
+    invalidLines: [],
+    duplicateCount: 0,
+    tooMany: false
   });
 });
 
-test('parseUrlCsv reads only the first CSV column', () => {
-  const result = parseUrlCsv([
-    'https://first.example,not a URL',
-    'not a URL,https://second.example',
-    'https://third.example,"comma, in ignored column"'
-  ].join('\n'));
-
-  assert.deepEqual(result, {
-    items: ['https://first.example/', 'https://third.example/'],
-    invalidCount: 1,
-    duplicateCount: 0
-  });
+test('parseUrlLines requires complete http(s) links and reports offending line numbers', () => {
+  const result = parseUrlLines('https://ok.example/a\nexample.com/no-scheme\nftp://x.example\nnot a url\nhttps://ok.example/b');
+  assert.deepEqual(result.items, ['https://ok.example/a', 'https://ok.example/b']);
+  assert.deepEqual(result.invalidLines, [2, 3, 4]);
 });
 
-test('parseUrlCsv ignores multiline quoted values outside the first column', () => {
-  const result = parseUrlCsv([
-    'url,notes',
-    'https://first.example,"ignored value',
-    'on another line"',
-    'https://second.example,another ignored value'
-  ].join('\n'));
+test('parseUrlLines de-duplicates identical links', () => {
+  const result = parseUrlLines('https://a.example/x\nHTTPS://A.EXAMPLE/x\nhttps://a.example/y');
+  assert.deepEqual(result.items, ['https://a.example/x', 'https://a.example/y']);
+  assert.equal(result.duplicateCount, 1);
+});
 
-  assert.deepEqual(result, {
-    items: ['https://first.example/', 'https://second.example/'],
-    invalidCount: 0,
-    duplicateCount: 0
-  });
+test('parseUrlLines allows up to 300 non-empty lines and flags more', () => {
+  assert.equal(MAX_URL_LINES, 300);
+  const lines = (n) => Array.from({ length: n }, (_, i) => `https://site.example/post-${i}`).join('\n');
+  const ok = parseUrlLines(lines(300) + '\n\n');
+  assert.equal(ok.tooMany, false);
+  assert.equal(ok.items.length, 300);
+  const over = parseUrlLines(lines(301));
+  assert.equal(over.tooMany, true);
+  assert.equal(over.lineCount, 301);
+  assert.deepEqual(over.items, []);
 });
 
 test('normalizeUrl trims input, adds https, and rejects invalid or unsupported URLs', () => {
@@ -56,16 +53,6 @@ test('normalizeUrl trims input, adds https, and rejects invalid or unsupported U
   assert.equal(normalizeUrl('ftp://example.com'), null);
   assert.equal(normalizeUrl('not a URL'), null);
   assert.equal(normalizeUrl(''), null);
-});
-
-test('parseUrlCsv de-duplicates normalized URLs and counts invalid entries', () => {
-  const result = parseUrlCsv('example.com\nhttps://example.com/\nftp://invalid.example\nexample.org');
-
-  assert.deepEqual(result, {
-    items: ['https://example.com/', 'https://example.org/'],
-    invalidCount: 1,
-    duplicateCount: 1
-  });
 });
 
 test('getDisplayDomain returns the lowercase hostname including www', () => {

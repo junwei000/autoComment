@@ -4,6 +4,9 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const utils = require('../lib/batch-utils');
 
+// 把文本填进 URL 输入框并点「加载」
+const load = (text) => `urlInput.value = ${JSON.stringify(text)}; loadUrlInput()`;
+
 function page({ runtimeReply, stored: initialStore } = {}) {
   const elements = new Map();
   const stored = initialStore || {};
@@ -11,7 +14,7 @@ function page({ runtimeReply, stored: initialStore } = {}) {
   const sent = [];
   const element = () => ({ value: '', checked: false, textContent: '', innerHTML: '', dataset: {}, style: {}, disabled: false, children: [], classList: { add() {}, remove() {} }, addEventListener() {}, appendChild(child) { this.children.push(child); }, querySelectorAll() { return []; }, focus() { this.focused = true; }, reportValidity() { return true; } });
   const context = {
-    console, TextDecoder, TextEncoder, Uint8Array, URL, setTimeout, clearTimeout, Papa: require('../lib/papaparse.min.js'),
+    console, TextDecoder, TextEncoder, Uint8Array, URL, setTimeout, clearTimeout,
     window: { AutoCommentBatchUtils: utils },
     document: { getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element, addEventListener() {} },
     chrome: { tabs: { remove: (id, cb) => { cb && cb(); } }, runtime: { sendMessage: async (message) => { sent.push(message); return runtimeReply; } }, storage: { local: { get: async () => stored, set: async (value) => Object.assign(stored, value), remove: async (keys) => keys.forEach(key => delete stored[key]) } } },
@@ -47,29 +50,45 @@ test('missing required configuration focuses the field and blocks starting', () 
 
 const rowText = (row) => row.children.map((cell) => cell.textContent).join(' | ');
 
-test('CSV accepts one headerless row, ignores extra columns, removes duplicates and previews the full URL', () => {
+test('URL input loads full links, removes duplicates and previews the full URL', () => {
   const app = page();
-  app.run(`parseCSV(new TextEncoder().encode(${JSON.stringify('Example.com/article,ignore.test\nhttps://example.com/article,else.test\n')}).buffer, 'urls.csv')`);
+  app.run(load('https://example.com/article\nhttps://example.com/article\n'));
   assert.equal(app.run('parsedUrls.length'), 1);
   assert.equal(app.run('parsedUrls[0].url'), 'https://example.com/article');
-  assert.match(app.elements.get('fileCount').textContent, /去重 1/);
+  assert.match(app.elements.get('urlSummary').textContent, /共 1 条.*去重 1 条/);
   const row = app.elements.get('urlPreviewBody').children[0];
   assert.equal(row.children[1].textContent, 'https://example.com/article');
   assert.equal(row.children[2].textContent, '待处理');
-  assert.doesNotMatch(rowText(row), /ignore.test|else.test/);
 });
 
-test('empty CSV and unclosed quotes produce useful errors', () => {
+test('empty input, links without scheme and more than 300 lines are rejected with a message', () => {
   const app = page();
-  app.run("parseCSV(new Uint8Array([]).buffer, 'empty.csv')");
-  assert.match(app.alerts[0], /没有有效 URL|为空/);
-  app.run("parseCSV(new Uint8Array([34, 97]).buffer, 'broken.csv')");
-  assert.match(app.alerts[1], /格式错误/);
+  app.run(load('   \n'));
+  assert.match(app.elements.get('urlSummary').textContent, /请输入/);
+  assert.equal(app.run('parsedUrls.length'), 0);
+
+  app.run(load('https://ok.example/a\nexample.com/b'));
+  assert.equal(app.run('parsedUrls.length'), 1);
+  assert.match(app.elements.get('urlSummary').textContent, /第 2 行/);
+
+  const many = Array.from({ length: 301 }, (_, i) => `https://s.example/${i}`).join('\n');
+  app.run(load(many));
+  assert.match(app.elements.get('urlSummary').textContent, /最多 300 行.*301/);
+  assert.equal(app.run('parsedUrls.length'), 1, 'previous list is kept');
+  assert.equal(app.alerts.length, 0);
 });
 
-test('importing a new CSV after completing a batch resets to idle and enables Start', async () => {
+test('the line counter tracks non-empty lines and warns past 300', () => {
   const app = page();
-  app.run("parseCSV(new TextEncoder().encode('first.example/article').buffer, 'first.csv')");
+  app.run("urlInput.value = 'https://a.example/1\\n\\nhttps://a.example/2'; updateUrlLineCounter()");
+  assert.equal(app.elements.get('urlLineCounter').textContent, '2 / 300 行');
+  app.run(`urlInput.value = ${JSON.stringify(Array.from({ length: 305 }, (_, i) => `https://s.example/${i}`).join('\n'))}; updateUrlLineCounter()`);
+  assert.equal(app.elements.get('urlLineCounter').dataset.state, 'error');
+});
+
+test('loading new URLs after completing a batch resets to idle and enables Start', async () => {
+  const app = page();
+  app.run(load('https://first.example/article'));
   app.run(`
     batchId = 'finished-batch';
     totalCount = 1;
@@ -82,7 +101,7 @@ test('importing a new CSV after completing a batch resets to idle and enables St
   assert.equal(app.run('status'), 'completed');
   assert.equal(app.elements.get('startBtn').disabled, true);
 
-  app.run("parseCSV(new TextEncoder().encode('second.example/new').buffer, 'second.csv')");
+  app.run(load('https://second.example/new'));
   assert.equal(app.elements.get('startBtn').disabled, false);
   assert.equal(app.run('status'), 'idle');
   assert.equal(app.run('isTerminated'), false);
@@ -93,7 +112,6 @@ test('importing a new CSV after completing a batch resets to idle and enables St
   assert.equal(app.run('skippedIndices.size'), 0);
   assert.equal(app.run('parsedUrls.length'), 1);
   assert.equal(app.run('parsedUrls[0].url'), 'https://second.example/new');
-  assert.equal(app.elements.get('fileName').textContent, 'second.csv');
 });
 
 test('connection test saves key/model, sends OPENROUTER_TEST and shows the reply', async () => {
@@ -124,7 +142,7 @@ test('connection test shows provider errors and requires key and model first', a
 
 test('preview rows show processing, then keep a success mark after the task completes', () => {
   const app = page();
-  app.run("parseCSV(new TextEncoder().encode('a.example/post\\nb.example/post').buffer, 'urls.csv')");
+  app.run(load('https://a.example/post\nhttps://b.example/post'));
   const [first, second] = app.elements.get('urlPreviewBody').children;
   app.run("highlightPreviewRow(0, 'processing')");
   assert.equal(first.children[2].textContent, '处理中');
@@ -137,7 +155,7 @@ test('preview rows show processing, then keep a success mark after the task comp
 
 test('a tab waiting on AI is not killed by the page timeout, and shows the phase', async () => {
   const app = page();
-  app.run("parseCSV(new TextEncoder().encode('a.example/post').buffer, 'urls.csv')");
+  app.run(load('https://a.example/post'));
   app.run(`
     batchId = 'b1'; totalCount = 1; status = 'running'; timeoutSeconds = 60;
     activeTabs.set(7, { urlIndex: 0, ...window.AutoCommentBatchUtils.createTabTimer(Date.now() - 100000) });
@@ -153,7 +171,7 @@ test('a tab waiting on AI is not killed by the page timeout, and shows the phase
 
 test('page timeout reports the phase that stalled', async () => {
   const app = page();
-  app.run("parseCSV(new TextEncoder().encode('a.example/post').buffer, 'urls.csv')");
+  app.run(load('https://a.example/post'));
   app.run(`
     batchId = 'b1'; totalCount = 1; status = 'running'; timeoutSeconds = 60;
     activeTabs.set(7, { urlIndex: 0, ...window.AutoCommentBatchUtils.createTabTimer(Date.now() - 61000) });
@@ -165,17 +183,16 @@ test('page timeout reports the phase that stalled', async () => {
 
 test('phase messages from another batch are ignored', () => {
   const app = page();
-  app.run("parseCSV(new TextEncoder().encode('a.example/post').buffer, 'urls.csv')");
+  app.run(load('https://a.example/post'));
   app.run(`batchId = 'b1'; activeTabs.set(7, { urlIndex: 0, ...window.AutoCommentBatchUtils.createTabTimer(Date.now()) });`);
   app.run("handleBatchPhase({ type: 'BATCH_PHASE', batchId: 'old', urlIndex: 0, phase: 'generating' })");
   assert.equal(app.run('activeTabs.get(7).phase'), 'loading');
 });
 
-const csv = (text) => `parseCSV(new TextEncoder().encode(${JSON.stringify(text)}).buffer, 'sites.csv')`;
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
 function runTwoResults(app) {
-  app.run(csv('a.example/post\nb.example/post\nc.example/post'));
+  app.run(load('https://a.example/post\nhttps://b.example/post\nhttps://c.example/post'));
   app.run(`batchId = 'b1'; totalCount = 3; pendingCount = 3; setStatus('running');`);
   app.run("handleTabResult(0, 'success', 'Nice post', null, 4)");
   app.run("handleTabResult(1, 'fail', null, 'boom', 2)");
@@ -189,7 +206,7 @@ test('file, statuses and progress survive reopening the batch page', async () =>
   const second = page({ stored: clone(first.stored) });
   await second.run('restoreBatchSnapshot()');
   assert.equal(second.run('parsedUrls.length'), 3);
-  assert.equal(second.elements.get('fileName').textContent, 'sites.csv');
+  assert.equal(second.elements.get('urlInput').value, 'https://a.example/post\nhttps://b.example/post\nhttps://c.example/post');
   const rows = second.elements.get('urlPreviewBody').children;
   assert.equal(rows[0].children[1].textContent, 'https://a.example/post');
   assert.equal(rows[0].children[2].textContent, 'success');
@@ -226,11 +243,11 @@ test('results confirmed while the batch page was closed are merged on restore', 
   assert.equal(second.run('status'), 'completed');
 });
 
-test('uploading a new file clears the previous task records', async () => {
+test('loading a new URL list clears the previous task records', async () => {
   const first = page();
   runTwoResults(first);
   await first.run('stopBatch()');
-  first.run(csv('new.example/post'));
+  first.run(load('https://new.example/post'));
   const snapshot = first.stored.batch_state_snapshot;
   assert.equal(snapshot.urls.length, 1);
   assert.equal(snapshot.urls[0].url, 'https://new.example/post');

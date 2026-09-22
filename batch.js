@@ -1,7 +1,7 @@
 // 批量外链评论自动化 - 扩展端核心逻辑（本地批次管理）
 
 // ==================== 配置 ====================
-const { parseUrlCsv, normalizeUrl, getDisplayDomain, createTabTimer, setTabPhase, evaluateTabTimeout, getPhaseLabel } = window.AutoCommentBatchUtils;
+const { parseUrlLines, MAX_URL_LINES, normalizeUrl, getDisplayDomain, createTabTimer, setTabPhase, evaluateTabTimeout, getPhaseLabel } = window.AutoCommentBatchUtils;
 const POLL_INTERVAL = 3000;
 const TIMEOUT_CHECK_INTERVAL = 5000;
 const TIMEOUT_STORAGE_KEY = 'batch_timeout_seconds';
@@ -48,12 +48,10 @@ let tabsWaitingClose = new Set();
 let skippedIndices = new Set();
 
 // ==================== DOM 引用 ====================
-const uploadZone = document.getElementById('uploadZone');
-const fileInput = document.getElementById('fileInput');
-const fileInfo = document.getElementById('fileInfo');
-const fileName = document.getElementById('fileName');
-const fileCount = document.getElementById('fileCount');
-const fileRemove = document.getElementById('fileRemove');
+const urlInput = document.getElementById('urlInput');
+const urlLineCounter = document.getElementById('urlLineCounter');
+const loadUrlsBtn = document.getElementById('loadUrlsBtn');
+const urlSummary = document.getElementById('urlSummary');
 const urlPreview = document.getElementById('urlPreview');
 const urlPreviewBody = document.getElementById('urlPreviewBody');
 const startBtn = document.getElementById('startBtn');
@@ -141,6 +139,7 @@ async function init() {
   bindEvents();
 
   updateUI();
+  updateUrlLineCounter();
   await restoreBatchSnapshot();
 }
 
@@ -239,15 +238,9 @@ function bindEvents() {
     if (validateSettings()) await saveLocalSettings();
   });
   testConnectionBtn.addEventListener('click', testOpenRouterConnection);
-  // 上传区域
-  uploadZone.addEventListener('click', () => fileInput.click());
-  uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
-  uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
-  uploadZone.addEventListener('drop', handleFileDrop);
-  fileInput.addEventListener('change', handleFileSelect);
-
-  // 文件信息
-  fileRemove.addEventListener('click', resetFile);
+  // URL 输入框
+  urlInput.addEventListener('input', updateUrlLineCounter);
+  loadUrlsBtn.addEventListener('click', loadUrlInput);
 
   // 操作按钮
   startBtn.addEventListener('click', () => {
@@ -287,36 +280,7 @@ function bindEvents() {
   filterKeyword.addEventListener('input', debounce(renderStats, 300));
 }
 
-// ==================== CSV 解析 ====================
-function handleFileDrop(e) {
-  e.preventDefault();
-  uploadZone.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (file) processFile(file);
-}
-
-function handleFileSelect(e) {
-  const file = e.target.files[0];
-  if (file) processFile(file);
-}
-
-function processFile(file) {
-  if (status === 'running') return;
-  if (!file.name.toLowerCase().endsWith('.csv')) {
-    alert('请上传 CSV 文件');
-    return;
-  }
-
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    parseCSV(e.target.result, file.name);
-  };
-  reader.onerror = () => {
-    alert('文件读取失败');
-  };
-  reader.readAsArrayBuffer(file);
-}
-
+// ==================== URL 输入 ====================
 function evaluateIllegalSiteForBatchItem(url, sourceDomain) {
   const filter = window.AutoCommentIllegalSiteFilter;
   if (!filter || typeof filter.evaluateUrl !== 'function') {
@@ -331,66 +295,43 @@ function getIllegalSiteBlockMessage(check) {
   return check.reason || '非法网站拦截：命中赌博/色情规则';
 }
 
-function normalizeEncoding(arrayBuffer) {
-  const bytes = new Uint8Array(arrayBuffer);
-  const len = bytes.length;
-
-  // UTF-16 LE BOM: FF FE
-  if (len >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
-    return new TextDecoder('utf-16le').decode(bytes.slice(2));
-  }
-  // UTF-16 BE BOM: FE FF
-  if (len >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
-    return new TextDecoder('utf-16be').decode(bytes.slice(2));
-  }
-  // UTF-8 BOM: EF BB BF（已在 TextDecoder 自动跳过，但保险起见再剥一层）
-  if (len >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-    return new TextDecoder('utf-8').decode(bytes.slice(3));
-  }
-  // 尝试检测 UTF-16 LE（无 BOM，但数据特征为每个 ASCII 后跟 00）
-  if (len >= 4 && bytes[1] === 0x00 && bytes[3] === 0x00) {
-    return new TextDecoder('utf-16le').decode(bytes);
-  }
-
-  // 检测 GBK/GB2312 编码：中文 GBK 双字节范围 0x81-0xFE
-  let hasGBKSignature = false;
-  for (let i = 0; i < len - 1; i++) {
-    const b = bytes[i];
-    if (b >= 0x81 && b <= 0xfe) {
-      hasGBKSignature = true;
-      break;
-    }
-  }
-
-  // 优先尝试 UTF-8 解码（现代标准）
-  const utf8Text = new TextDecoder('utf-8').decode(bytes);
-
-  // 如果 UTF-8 解码后仍包含乱码特征（连续问号或方框），尝试 GBK
-  if (hasGBKSignature && (utf8Text.includes('�') || utf8Text.includes('???') || /[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(utf8Text.slice(0, 100)))) {
-    try {
-      // 使用 GBK/GB2312/GB18030 解码
-      const gbkText = new TextDecoder('gbk').decode(bytes);
-      // 验证 GBK 解码结果是否包含有效中文（GBK 中常用汉字在 0xB0-0xF7 范围）
-      const validChineseCount = (gbkText.match(/[\u4e00-\u9fa5]/g) || []).length;
-      if (validChineseCount > 0) {
-        return gbkText;
-      }
-    } catch (e) {
-      // GBK 解码失败，回退到 UTF-8
-    }
-  }
-
-  return utf8Text;
+function countUrlLines(text) {
+  return text.split(/\r?\n/).filter((line) => line.trim()).length;
 }
 
-function parseCSV(raw, fileNameParam) {
-  const text = normalizeEncoding(raw);
-  if (Papa.parse(text, { delimiter: ',', skipEmptyLines: true }).errors.length) {
-    resetFile();
-    alert('CSV 格式错误，请检查引号是否完整');
+function updateUrlLineCounter() {
+  const count = countUrlLines(urlInput.value);
+  urlLineCounter.textContent = `${count} / ${MAX_URL_LINES} 行`;
+  urlLineCounter.dataset.state = count > MAX_URL_LINES ? 'error' : '';
+}
+
+function showUrlSummary(text, state) {
+  urlSummary.textContent = text;
+  urlSummary.dataset.state = state || '';
+}
+
+function describeLines(lineNumbers) {
+  const shown = lineNumbers.slice(0, 10).join('、');
+  return lineNumbers.length > 10 ? `${shown} 等 ${lineNumbers.length} 行` : shown;
+}
+
+// 把输入框里的链接加载为新的待处理列表（会清空上一批的任务记录）
+function loadUrlInput() {
+  if (status === 'running') return;
+  const { items, lineCount, invalidLines, duplicateCount, tooMany } = parseUrlLines(urlInput.value);
+  if (lineCount === 0) {
+    showUrlSummary('请输入要处理的 URL，每行一个', 'error');
     return;
   }
-  const { items, invalidCount, duplicateCount } = parseUrlCsv(text);
+  if (tooMany) {
+    showUrlSummary(`最多 ${MAX_URL_LINES} 行，当前 ${lineCount} 行，请删减后再加载`, 'error');
+    return;
+  }
+  if (items.length === 0) {
+    showUrlSummary(`没有有效链接：第 ${describeLines(invalidLines)} 行不是以 http:// 或 https:// 开头的完整链接`, 'error');
+    return;
+  }
+
   let illegalCount = 0;
   let blacklistedCount = 0;
   parsedUrls = [];
@@ -403,12 +344,8 @@ function parseCSV(raw, fileNameParam) {
       blacklistedCount++;
       continue;
     }
-
     const illegalCheck = evaluateIllegalSiteForBatchItem(url, sourceDomain);
-    if (illegalCheck.blocked) {
-      illegalCount++;
-    }
-
+    if (illegalCheck.blocked) illegalCount++;
     parsedUrls.push({
       originalIndex: parsedUrls.length,
       url,
@@ -416,47 +353,35 @@ function parseCSV(raw, fileNameParam) {
       illegalCheck: illegalCheck.blocked ? illegalCheck : null,
       originalRow: [url]
     });
-
     urlPreviewBody.appendChild(createPreviewRow(parsedUrls.length - 1, url, illegalCheck));
   }
 
-  const validCount = parsedUrls.length;
+  const notes = [];
+  if (duplicateCount) notes.push(`去重 ${duplicateCount} 条`);
+  if (invalidLines.length) notes.push(`跳过第 ${describeLines(invalidLines)} 行（不是完整链接）`);
+  if (illegalCount) notes.push(`非法拦截 ${illegalCount} 条`);
+  if (blacklistedCount) notes.push(`跳过 ${blacklistedCount} 条黑名单域名`);
+  showUrlSummary(`已加载，共 ${parsedUrls.length} 条${notes.length ? `；${notes.join('，')}` : ''}`, invalidLines.length ? 'warn' : 'ok');
   urlPreview.classList.add('visible');
-  fileName.textContent = fileNameParam || '已上传文件';
-  fileInfo.classList.add('visible');
-  uploadZone.classList.add('has-file');
-  fileCount.textContent = `共 ${validCount} 条 URL`;
-  if (invalidCount > 0) fileCount.textContent += `（跳过 ${invalidCount} 条无效）`;
-  if (illegalCount > 0) fileCount.textContent += `（非法拦截 ${illegalCount} 条）`;
-  if (blacklistedCount > 0) fileCount.textContent += `（跳过 ${blacklistedCount} 条黑名单域名）`;
-  if (duplicateCount > 0) {
-    fileCount.textContent += `（去重 ${duplicateCount} 条）`;
-  }
-  document.getElementById('duplicateCount').textContent = duplicateCount ? `已去重 ${duplicateCount} 条` : '';
-  if (validCount) resetBatchState();
-  else alert('CSV 中没有有效 URL，请检查第一列');
-  updateUI();
+  resetBatchState();
 }
 
-function resetFile() {
+function resetUrlList() {
   if (status === 'running') return;
-  fileInput.value = '';
-  fileInfo.classList.remove('visible');
-  uploadZone.classList.remove('has-file');
   urlPreview.classList.remove('visible');
   urlPreviewBody.innerHTML = '';
   parsedUrls = [];
   previewRows = new Map();
   startBtn.disabled = true;
-  fileCount.textContent = '';
-  document.getElementById('duplicateCount').textContent = '';
+  showUrlSummary('', '');
 }
 
 // ==================== 批量处理核心 ====================
 async function startBatch() {
   if (!validateSettings()) return;
   if (parsedUrls.length === 0) {
-    alert('请先上传有效的 CSV 文件');
+    showUrlSummary('请先输入 URL 并点击「加载到待处理列表」', 'error');
+    urlInput.focus();
     return;
   }
 
@@ -912,7 +837,7 @@ function checkAllCompleted(options = {}) {
 }
 
 // ==================== 本地任务快照 ====================
-// 文件、URL 列表、批次状态和全部结果保存在本机，重新打开批量页时恢复；上传新文件时清空
+// 输入的 URL、待处理列表、批次状态和全部结果保存在本机，重新打开批量页时恢复；加载新 URL 时清空
 const BATCH_SNAPSHOT_KEY = 'batch_state_snapshot';
 
 function saveBatchSnapshot() {
@@ -920,9 +845,9 @@ function saveBatchSnapshot() {
   chrome.storage.local.set({
     [BATCH_SNAPSHOT_KEY]: {
       version: 1,
-      fileName: fileName.textContent,
-      fileCountText: fileCount.textContent,
-      duplicateText: document.getElementById('duplicateCount').textContent,
+      inputText: urlInput.value,
+      summaryText: urlSummary.textContent,
+      summaryState: urlSummary.dataset.state || '',
       urls: parsedUrls.map((item) => ({ url: item.url, illegalCheck: item.illegalCheck || null })),
       batchId,
       status,
@@ -946,11 +871,9 @@ async function restoreBatchSnapshot() {
     urlPreviewBody.appendChild(createPreviewRow(index, url, { blocked: !!illegalCheck, ...(illegalCheck || {}) }));
   });
   urlPreview.classList.add('visible');
-  fileName.textContent = snapshot.fileName || '已上传文件';
-  fileCount.textContent = snapshot.fileCountText || `共 ${parsedUrls.length} 条 URL`;
-  document.getElementById('duplicateCount').textContent = snapshot.duplicateText || '';
-  fileInfo.classList.add('visible');
-  uploadZone.classList.add('has-file');
+  urlInput.value = typeof snapshot.inputText === 'string' ? snapshot.inputText : parsedUrls.map((item) => item.url).join('\n');
+  updateUrlLineCounter();
+  showUrlSummary(snapshot.summaryText || `已加载，共 ${parsedUrls.length} 条`, snapshot.summaryState);
 
   batchId = snapshot.batchId || null;
   totalCount = snapshot.totalCount || 0;
@@ -1095,6 +1018,9 @@ function updateUI() {
 
   exportBtn.disabled = localResults.length === 0;
   clearBtn.disabled = isRunning;
+  // 运行中不允许改动待处理列表
+  urlInput.disabled = isRunning;
+  loadUrlsBtn.disabled = isRunning;
 
   // 进度、实时日志、底部操作：终止状态保持显示
   progressSection.style.display = (isIdle) ? 'none' : 'block';
@@ -1164,7 +1090,7 @@ function exportResults() {
 }
 
 function clearBatch() {
-  resetFile();
+  resetUrlList();
   resetBatchState();
 }
 
@@ -1196,7 +1122,7 @@ function resetBatchState() {
   filterTimeRange.value = 'all';
   filterKeyword.value = '';
   const staleKeys = ['batchLocalResults', BATCH_SETTINGS_KEY, BATCH_URLS_KEY, 'batchCtx', 'batchSubmitCtx'];
-  // 有新文件时由 setStatus 直接用新文件的快照覆盖；清空批次时删除快照
+  // 加载新 URL 时由 setStatus 直接用新列表的快照覆盖；清空批次时删除快照
   if (parsedUrls.length === 0) staleKeys.push(BATCH_SNAPSHOT_KEY);
   chrome.storage.local.remove(staleKeys);
   setStatus('idle');
