@@ -72,6 +72,8 @@ const exportBtn = document.getElementById('exportBtn');
 const clearBtn = document.getElementById('clearBtn');
 const settingsFields = Object.fromEntries(['apiKey', 'modelId', 'website', 'description', 'nickname', 'email'].map(id => [id, document.getElementById(id)]));
 const settingsStatus = document.getElementById('settingsStatus');
+const testConnectionBtn = document.getElementById('testConnectionBtn');
+const testConnectionStatus = document.getElementById('testConnectionStatus');
 const statusBadge = document.getElementById('statusBadge');
 const timeoutInput = document.getElementById('timeoutInput');
 const statsPanel = document.getElementById('statsPanel');
@@ -175,6 +177,38 @@ function validateSettings() {
   return true;
 }
 
+// 用当前填写的 Key 与模型发一条测试消息，确认 OpenRouter 能跑通
+async function testOpenRouterConnection() {
+  for (const id of ['apiKey', 'modelId']) {
+    if (!settingsFields[id].value.trim()) {
+      settingsFields[id].focus();
+      testConnectionStatus.textContent = '请先填写 API Key 和模型 ID';
+      testConnectionStatus.dataset.state = 'error';
+      return;
+    }
+  }
+  testConnectionBtn.disabled = true;
+  testConnectionStatus.textContent = '正在发送测试消息…';
+  testConnectionStatus.dataset.state = 'pending';
+  try {
+    await saveLocalSettings();
+    const reply = await chrome.runtime.sendMessage({ type: 'OPENROUTER_TEST' });
+    if (reply && reply.ok) {
+      const seconds = (reply.elapsedMs / 1000).toFixed(1);
+      testConnectionStatus.textContent = `连接成功 · ${reply.model} · ${seconds}s · 回复：${reply.text.slice(0, 80)}`;
+      testConnectionStatus.dataset.state = 'ok';
+    } else {
+      testConnectionStatus.textContent = `连接失败：${(reply && reply.error) || '后台无响应'}`;
+      testConnectionStatus.dataset.state = 'error';
+    }
+  } catch (_) {
+    testConnectionStatus.textContent = '连接失败：无法联系插件后台，请重新加载插件';
+    testConnectionStatus.dataset.state = 'error';
+  } finally {
+    testConnectionBtn.disabled = false;
+  }
+}
+
 async function loadTimeoutSetting() {
   return new Promise((resolve) => {
     chrome.storage.local.get([TIMEOUT_STORAGE_KEY], (data) => {
@@ -203,6 +237,7 @@ function bindEvents() {
   document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
     if (validateSettings()) await saveLocalSettings();
   });
+  testConnectionBtn.addEventListener('click', testOpenRouterConnection);
   // 上传区域
   uploadZone.addEventListener('click', () => fileInput.click());
   uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
@@ -709,6 +744,14 @@ async function openNextTab() {
             }
           }).catch((err) => {
             console.warn('[batch] sendMessage BATCH_HANDLE 发送失败:', err.message || err, 'tabId:', tab.id);
+            if (isPortClosedAfterNavigation(err)) {
+              // 提交后页面刷新会断开响应通道：由刷新后的页面补发确认，或由单页超时兜底
+              if (!localResults.some((r) => r.originalIndex === urlIndex) && activeTabs.has(tab.id)) {
+                tabsPendingConfirm.set(tab.id, { urlIndex });
+                tabsWaitingClose.add(tab.id);
+              }
+              return;
+            }
             // 发送失败时，如果尚未记录结果，则记为失败
             if (!localResults.some((r) => r.originalIndex === urlIndex)) {
               console.log('[batch] sendMessage 失败但无结果记录，记为失败');
@@ -729,6 +772,11 @@ async function openNextTab() {
       setTimeout(openNextTabSync, 1000);
     }
   }
+}
+
+function isPortClosedAfterNavigation(err) {
+  const message = String((err && err.message) || err || '');
+  return /message port closed|message channel closed|back\/forward cache/i.test(message);
 }
 
 // 处理标签页结果

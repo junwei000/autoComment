@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createSubmissionWaiter } = require('../lib/submission-waiter');
+const { createSubmissionWaiter, createSubmitContext, readRestoredSubmitContext, SUBMIT_TIMEOUT_MS } = require('../lib/submission-waiter');
 
 function createControlledWaiter() {
   let navigationListener;
@@ -68,4 +68,28 @@ test('wait resolves exactly once when navigation and timeout both fire', async (
 
   assert.equal(await waiting, 'navigation');
   assert.deepEqual(controlled.calls, { add: 1, remove: 1, clear: 1 });
+});
+
+test('post-submit timeout is exactly 10 seconds', () => {
+  assert.equal(SUBMIT_TIMEOUT_MS, 10_000);
+});
+
+test('createSubmitContext persists everything the restored page needs to confirm', () => {
+  const ctx = createSubmitContext({ batchId: 'b1', urlIndex: 3, url: 'https://blog.example/post', aiContent: 'Nice post' }, 1000);
+  assert.deepEqual(ctx, { batchId: 'b1', urlIndex: 3, url: 'https://blog.example/post', result: 'success', aiContent: 'Nice post', errorMessage: null, submittedAt: 1000 });
+});
+
+test('restored page on the same site within the window yields a success confirmation', () => {
+  const ctx = createSubmitContext({ batchId: 'b1', urlIndex: 3, url: 'https://www.blog.example/post', aiContent: 'Nice post' }, 1000);
+  assert.deepEqual(readRestoredSubmitContext(ctx, 'https://blog.example/post/#comment-9', 5000), {
+    batchId: 'b1', urlIndex: 3, url: 'https://www.blog.example/post', result: 'success', aiContent: 'Nice post', errorMessage: null
+  });
+});
+
+test('restored context is ignored on other sites, when stale, or when malformed', () => {
+  const ctx = createSubmitContext({ batchId: 'b1', urlIndex: 0, url: 'https://blog.example/post', aiContent: 'x' }, 1000);
+  assert.equal(readRestoredSubmitContext(ctx, 'https://unrelated.test/', 2000), null);
+  assert.equal(readRestoredSubmitContext(ctx, 'https://blog.example/post', 1000 + 5 * 60 * 1000), null);
+  assert.equal(readRestoredSubmitContext(null, 'https://blog.example/post', 2000), null);
+  assert.equal(readRestoredSubmitContext({ ...ctx, urlIndex: undefined }, 'https://blog.example/post', 2000), null);
 });

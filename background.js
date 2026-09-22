@@ -23,22 +23,20 @@ function redactCredential(value, apiKey) {
   return value.split(apiKey).join('[已隐藏 API Key]');
 }
 
-async function generateComment(message) {
+async function callOpenRouter(messages) {
   let apiKey = '';
   try {
     const settings = await chrome.storage.local.get(['openrouter_api_key', 'openrouter_model']);
     apiKey = typeof settings.openrouter_api_key === 'string' ? settings.openrouter_api_key.trim() : '';
     if (!apiKey) return { ok: false, error: '请配置 OpenRouter API Key' };
     if (!settings.openrouter_model?.trim()) return { ok: false, error: '请配置 OpenRouter 模型 ID' };
-    const request = AutoCommentOpenRouter.buildOpenRouterRequest({
-      apiKey, model: settings.openrouter_model,
-      messages: buildCommentMessages(message.pageContext || {}, message.siteProfile || {})
-    });
+    const request = AutoCommentOpenRouter.buildOpenRouterRequest({ apiKey, model: settings.openrouter_model, messages });
     const response = await fetch(request.url, { ...request.options, signal: AbortSignal.timeout(60000) });
     const payload = await response.json().catch(() => null);
     const result = AutoCommentOpenRouter.parseOpenRouterResponse(response, payload);
+    const model = typeof payload?.model === 'string' ? payload.model : settings.openrouter_model.trim();
     return result.ok
-      ? { ok: true, text: redactCredential(result.text, apiKey) }
+      ? { ok: true, text: redactCredential(result.text, apiKey), model }
       : { ok: false, error: redactCredential(result.error, apiKey) };
   } catch (_) {
     // Network/provider exceptions may contain request headers. Never expose them.
@@ -46,10 +44,39 @@ async function generateComment(message) {
   }
 }
 
+async function generateComment(message) {
+  const result = await callOpenRouter(buildCommentMessages(message.pageContext || {}, message.siteProfile || {}));
+  return result.ok ? { ok: true, text: result.text } : result;
+}
+
+const CONNECTION_TEST_MESSAGES = [
+  { role: 'system', content: 'You are a connectivity check. Reply with the single word OK.' },
+  { role: 'user', content: 'Connection test from AutoComment. Reply with OK.' }
+];
+
+async function testConnection() {
+  const startedAt = Date.now();
+  const result = await callOpenRouter(CONNECTION_TEST_MESSAGES);
+  return { ...result, elapsedMs: Date.now() - startedAt };
+}
+
+function isExtensionPage(sender) {
+  return typeof sender?.url === 'string' && sender.url.startsWith(chrome.runtime.getURL(''));
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== 'OPENROUTER_GENERATE') return;
-  generateComment(message).then(sendResponse);
-  return true;
+  if (message?.type === 'OPENROUTER_GENERATE') {
+    generateComment(message).then(sendResponse);
+    return true;
+  }
+  if (message?.type === 'OPENROUTER_TEST') {
+    if (!isExtensionPage(sender)) {
+      sendResponse({ ok: false, error: '仅允许从插件页面发起连接测试' });
+      return;
+    }
+    testConnection().then(sendResponse);
+    return true;
+  }
 });
 
 /**
@@ -128,24 +155,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log('[background] BATCH_HANDLE_CONFIRM <<< sendResponse({ok:true})');
       } catch (e) {
         console.error('[background] BATCH_HANDLE_CONFIRM 错误:', e);
-        sendResponse({ ok: false, error: String(e) });
-      }
-    })();
-    return true;
-  }
-});
-
-// 批量任务结果：content / batch 页 -> background 持久化
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message && message.type === 'BATCH_REPORT_RESULT') {
-    console.log('[background] 收到 BATCH_REPORT_RESULT >>>', { batchId: message.batchId, urlIndex: message.urlIndex, result: message.result, sender: sender.tab ? sender.tab.id : 'N/A', time: new Date().toISOString() });
-    (async () => {
-      try {
-        await persistBatchReport(message);
-        console.log('[background] BATCH_REPORT_RESULT <<< sendResponse({ok:true})');
-        sendResponse({ ok: true });
-      } catch (e) {
-        console.error('[background] BATCH_REPORT_RESULT 错误:', e);
         sendResponse({ ok: false, error: String(e) });
       }
     })();

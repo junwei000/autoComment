@@ -621,7 +621,12 @@
       .settings-grid input, .settings-grid textarea { width:100%; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; font:inherit; }
       .settings-grid textarea { min-height:88px; resize:vertical; }
       .settings-grid input:focus, .settings-grid textarea:focus { outline:2px solid #93c5fd; border-color:#2563eb; }
-      .settings-actions { display:flex; align-items:center; gap:14px; margin-top:16px; }
+      .settings-actions { display:flex; align-items:center; flex-wrap:wrap; gap:14px; margin-top:16px; }
+      .connection-status { margin-top:10px; font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
+      .connection-status:empty { display:none; }
+      .connection-status[data-state="pending"] { color:#6b7280; }
+      .connection-status[data-state="ok"] { color:#047857; }
+      .connection-status[data-state="error"] { color:#b91c1c; }
       .workspace-grid { display:grid; grid-template-columns:minmax(0, 1.5fr) minmax(320px, 1fr); gap:16px; align-items:start; }
       .workspace-grid .card { min-width:0; }
       .stats-table-wrap { overflow-x:auto; }
@@ -664,8 +669,10 @@
         </div>
         <div class="settings-actions">
           <button class="btn btn-secondary" id="saveSettingsBtn" type="button">保存配置</button>
+          <button class="btn btn-secondary" id="testConnectionBtn" type="button">测试连接</button>
           <span class="hint" id="settingsStatus" role="status">配置仅保存在此浏览器。Key 由插件后台用于调用 OpenRouter。</span>
         </div>
+        <div class="connection-status" id="testConnectionStatus" role="status" aria-live="polite"></div>
       </section>
 
       <div class="workspace-grid">

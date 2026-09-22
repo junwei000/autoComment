@@ -22,9 +22,9 @@ function loadBackground(payload, { networkError = false, configured = true } = {
   } };
   const source = fs.readFileSync(require.resolve('../background.js'), 'utf8').replace(/^import .*;\s*$/gm, '');
   vm.runInNewContext(source, context);
-  return { chrome, requests, tabs, send: (message) => new Promise((resolve, reject) => {
+  return { chrome, requests, tabs, send: (message, sender = {}) => new Promise((resolve, reject) => {
     let handled = false;
-    for (const listener of listeners) handled = listener(message, {}, resolve) || handled;
+    for (const listener of listeners) handled = listener(message, sender, resolve) || handled;
     if (!handled) reject(new Error('OPENROUTER_GENERATE message not handled'));
   }) };
 }
@@ -96,5 +96,36 @@ test('missing local configuration fails before making a request', async () => {
   const result = await app.send({ type: 'OPENROUTER_GENERATE', pageContext: {}, siteProfile: {} });
   assert.equal(result.ok, false);
   assert.match(result.error, /API Key/);
+  assert.equal(app.requests.length, 0);
+});
+
+const extensionPage = { url: 'chrome-extension://test/batch.html' };
+
+test('connection test sends a short probe with the saved model and reports the reply', async () => {
+  const app = loadBackground({ model: 'provider/test-model-v2', choices: [{ message: { content: 'OK' } }] });
+  const result = await app.send({ type: 'OPENROUTER_TEST' }, extensionPage);
+  assert.equal(result.ok, true);
+  assert.equal(result.text, 'OK');
+  assert.equal(result.model, 'provider/test-model-v2');
+  assert.equal(typeof result.elapsedMs, 'number');
+  assert.equal(app.requests.length, 1);
+  const body = JSON.parse(app.requests[0].options.body);
+  assert.equal(body.model, 'provider/test-model');
+  assert.equal(body.messages.at(-1).role, 'user');
+  assert.equal(JSON.stringify(result).includes('private-test-key'), false);
+});
+
+test('connection test surfaces provider errors without leaking the key', async () => {
+  const app = loadBackground({ error: { message: 'User not found: private-test-key' } });
+  const result = await app.send({ type: 'OPENROUTER_TEST' }, extensionPage);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /OpenRouter \(401\)/);
+  assert.equal(JSON.stringify(result).includes('private-test-key'), false);
+});
+
+test('connection test is only accepted from extension pages', async () => {
+  const app = loadBackground({ choices: [{ message: { content: 'OK' } }] });
+  const result = await app.send({ type: 'OPENROUTER_TEST' }, { url: 'https://evil.example/', tab: { id: 1 } });
+  assert.equal(result.ok, false);
   assert.equal(app.requests.length, 0);
 });

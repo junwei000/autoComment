@@ -21,7 +21,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["illegal-site-filter.js", "content.js"],
+      "js": ["illegal-site-filter.js", "lib/submission-waiter.js", "content.js"],
       "run_at": "document_idle"
     }
   ]
