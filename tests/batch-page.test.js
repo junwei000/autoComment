@@ -228,6 +228,7 @@ test('a batch that was running when the page closed comes back as terminated and
   await second.run('restoreBatchSnapshot()');
   assert.equal(second.run('status'), 'terminated');
   assert.equal(second.run('isTerminated'), true);
+  assert.equal(second.elements.get('startBtn').textContent, '▶ 继续处理');
 });
 
 test('results confirmed while the batch page was closed are merged on restore', async () => {

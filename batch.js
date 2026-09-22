@@ -818,7 +818,7 @@ async function restoreBatchSnapshot() {
   for (const r of localResults) countResult(r.originalIndex, r.result);
   pendingCount = Math.max(0, totalCount - getProcessedCount());
 
-  // 关闭页面时仍在运行的批次：标签页已失控，恢复为「已终止」，可点「重新开始」续跑
+  // 关闭页面时仍在运行的批次：标签页已失控，恢复为「已终止」，可点「继续处理」续跑
   let restoredStatus = snapshot.status || 'idle';
   if (restoredStatus === 'running') restoredStatus = 'terminated';
   if (restoredStatus === 'terminated' && totalCount > 0 && getProcessedCount() >= totalCount) restoredStatus = 'completed';
@@ -930,10 +930,10 @@ function updateUI() {
   const isCompleted = status === 'completed';
   const isTerminated = status === 'terminated';
 
-  // 开始按钮：空闲时可开始，终止时可重新开始
+  // 开始按钮：空闲时可开始，终止后可继续处理
   startBtn.disabled = isRunning || isCompleted || parsedUrls.length === 0;
-  // 终止状态下显示"重新开始"，正常空闲显示"开始批量处理"
-  startBtn.textContent = isTerminated ? '▶ 重新开始' : '▶ 开始批量处理';
+  // 终止状态下显示"继续处理"（从未处理的 URL 接着跑），正常空闲显示"开始批量处理"
+  startBtn.textContent = isTerminated ? '▶ 继续处理' : '▶ 开始批量处理';
 
   stopBtn.disabled = isIdle || isTerminated || isCompleted;
   stopBtn.style.display = (isTerminated || isCompleted) ? 'none' : 'inline-flex';
@@ -957,7 +957,7 @@ function updateUI() {
     renderStats();
   }
 
-  // 终止状态下可重新开始，将待处理计数恢复
+  // 终止状态下可继续处理，将待处理计数恢复
   if (isTerminated) {
     pendingCount = totalCount - getProcessedCount();
     updateStatsUI();
