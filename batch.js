@@ -402,7 +402,8 @@ function parseCSV(raw, fileNameParam) {
     fileCount.textContent += `（去重 ${duplicateCount} 条）`;
   }
   document.getElementById('duplicateCount').textContent = duplicateCount ? `已去重 ${duplicateCount} 条` : '';
-  if (!validCount) alert('CSV 中没有有效 URL，请检查第一列');
+  if (validCount) resetBatchState();
+  else alert('CSV 中没有有效 URL，请检查第一列');
   updateUI();
 }
 
@@ -1054,14 +1055,21 @@ function exportResults() {
 
 function clearBatch() {
   resetFile();
+  resetBatchState();
+}
+
+// A newly accepted file starts a fresh batch without clearing its URL preview.
+function resetBatchState() {
   batchId = null;
   totalCount = successCount = failCount = skippedCount = noCommentBoxCount = manualRequiredCount = blockedIllegalCount = pendingCount = 0;
   currentIndex = 0;
   localResults = [];
+  activeTabCount = 0;
   activeTabs.clear();
   activeTabsByIndex.clear();
   tabsPendingConfirm.clear();
   tabsWaitingClose.clear();
+  skippedIndices.clear();
   isTerminated = false;
   isOpeningTab = false;
   statsTableBody.innerHTML = '';
