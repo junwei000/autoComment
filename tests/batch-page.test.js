@@ -4,9 +4,9 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const utils = require('../lib/batch-utils');
 
-function page({ runtimeReply } = {}) {
+function page({ runtimeReply, stored: initialStore } = {}) {
   const elements = new Map();
-  const stored = {};
+  const stored = initialStore || {};
   const alerts = [];
   const sent = [];
   const element = () => ({ value: '', checked: false, textContent: '', innerHTML: '', dataset: {}, style: {}, disabled: false, children: [], classList: { add() {}, remove() {} }, addEventListener() {}, appendChild(child) { this.children.push(child); }, querySelectorAll() { return []; }, focus() { this.focused = true; }, reportValidity() { return true; } });
@@ -169,4 +169,85 @@ test('phase messages from another batch are ignored', () => {
   app.run(`batchId = 'b1'; activeTabs.set(7, { urlIndex: 0, ...window.AutoCommentBatchUtils.createTabTimer(Date.now()) });`);
   app.run("handleBatchPhase({ type: 'BATCH_PHASE', batchId: 'old', urlIndex: 0, phase: 'generating' })");
   assert.equal(app.run('activeTabs.get(7).phase'), 'loading');
+});
+
+const csv = (text) => `parseCSV(new TextEncoder().encode(${JSON.stringify(text)}).buffer, 'sites.csv')`;
+const clone = (value) => JSON.parse(JSON.stringify(value));
+
+function runTwoResults(app) {
+  app.run(csv('a.example/post\nb.example/post\nc.example/post'));
+  app.run(`batchId = 'b1'; totalCount = 3; pendingCount = 3; setStatus('running');`);
+  app.run("handleTabResult(0, 'success', 'Nice post', null, 4)");
+  app.run("handleTabResult(1, 'fail', null, 'boom', 2)");
+}
+
+test('file, statuses and progress survive reopening the batch page', async () => {
+  const first = page();
+  runTwoResults(first);
+  await first.run('stopBatch()');
+
+  const second = page({ stored: clone(first.stored) });
+  await second.run('restoreBatchSnapshot()');
+  assert.equal(second.run('parsedUrls.length'), 3);
+  assert.equal(second.elements.get('fileName').textContent, 'sites.csv');
+  const rows = second.elements.get('urlPreviewBody').children;
+  assert.equal(rows[0].children[1].textContent, 'https://a.example/post');
+  assert.equal(rows[0].children[2].textContent, 'success');
+  assert.equal(rows[1].children[2].textContent, '失败');
+  assert.equal(rows[2].children[2].textContent, '待处理');
+  assert.equal(second.run('successCount'), 1);
+  assert.equal(second.run('failCount'), 1);
+  assert.equal(second.run('localResults.length'), 2);
+  assert.equal(second.run('status'), 'terminated');
+  assert.equal(second.run('batchId'), 'b1');
+  assert.equal(second.elements.get('progressText').textContent, '2/3 (67%)');
+  assert.equal(second.elements.get('startBtn').disabled, false);
+});
+
+test('a batch that was running when the page closed comes back as terminated and resumable', async () => {
+  const first = page();
+  runTwoResults(first);
+  const second = page({ stored: clone(first.stored) });
+  await second.run('restoreBatchSnapshot()');
+  assert.equal(second.run('status'), 'terminated');
+  assert.equal(second.run('isTerminated'), true);
+});
+
+test('results confirmed while the batch page was closed are merged on restore', async () => {
+  const first = page();
+  runTwoResults(first);
+  const stored = clone(first.stored);
+  stored.batchResults = [{ batchId: 'b1', urlIndex: 2, url: 'https://c.example/post', result: 'success', aiContent: 'Late', timestamp: 1 },
+    { batchId: 'other', urlIndex: 0, result: 'fail', timestamp: 1 }];
+  const second = page({ stored });
+  await second.run('restoreBatchSnapshot()');
+  assert.equal(second.run('successCount'), 2);
+  assert.equal(second.run('localResults.length'), 3);
+  assert.equal(second.run('status'), 'completed');
+});
+
+test('uploading a new file clears the previous task records', async () => {
+  const first = page();
+  runTwoResults(first);
+  await first.run('stopBatch()');
+  first.run(csv('new.example/post'));
+  const snapshot = first.stored.batch_state_snapshot;
+  assert.equal(snapshot.urls.length, 1);
+  assert.equal(snapshot.urls[0].url, 'https://new.example/post');
+  assert.deepEqual(clone(snapshot.results), []);
+  assert.equal(snapshot.status, 'idle');
+
+  const second = page({ stored: clone(first.stored) });
+  await second.run('restoreBatchSnapshot()');
+  assert.equal(second.run('successCount'), 0);
+  assert.equal(second.run('status'), 'idle');
+  assert.equal(second.elements.get('urlPreviewBody').children[0].children[2].textContent, '待处理');
+});
+
+test('clearing the batch removes the snapshot', async () => {
+  const app = page();
+  runTwoResults(app);
+  await app.run('stopBatch()');
+  app.run('clearBatch()');
+  assert.equal(app.stored.batch_state_snapshot, undefined);
 });

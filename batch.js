@@ -141,6 +141,7 @@ async function init() {
   bindEvents();
 
   updateUI();
+  await restoreBatchSnapshot();
 }
 
 async function loadLocalSettings() {
@@ -774,6 +775,17 @@ function isPortClosedAfterNavigation(err) {
   return /message port closed|message channel closed|back\/forward cache/i.test(message);
 }
 
+// 按结果类型累计计数并标记列表行（新结果与恢复快照共用）
+function countResult(urlIndex, result) {
+  if (result === 'success') successCount++;
+  else if (result === 'skipped') { skippedCount++; skippedIndices.add(urlIndex); }
+  else if (result === 'no_comment_box') noCommentBoxCount++;
+  else if (result === 'manual_required') manualRequiredCount++;
+  else if (result === 'blocked_illegal') blockedIllegalCount++;
+  else failCount++;
+  highlightPreviewRow(urlIndex, ['success', 'skipped', 'no_comment_box', 'manual_required', 'blocked_illegal'].includes(result) ? result : 'fail');
+}
+
 // 处理标签页结果
 // elapsed 可选，外部已知的耗时直接传入（如手动关闭时），否则从 activeTabsByIndex 计算
 function handleTabResult(urlIndex, result, aiContent, errorMessage, forcedElapsed, options = {}) {
@@ -810,33 +822,13 @@ function handleTabResult(urlIndex, result, aiContent, errorMessage, forcedElapse
 
   localResults.push(resultEntry);
 
-  if (result === 'success') {
-    successCount++;
-    highlightPreviewRow(urlIndex, 'success');
-  } else if (result === 'skipped') {
-    skippedCount++;
-    skippedIndices.add(urlIndex);
-    highlightPreviewRow(urlIndex, 'skipped');
-  } else if (result === 'no_comment_box') {
-    noCommentBoxCount++;
-    highlightPreviewRow(urlIndex, 'no_comment_box');
-  } else if (result === 'manual_required') {
-    manualRequiredCount++;
-    highlightPreviewRow(urlIndex, 'manual_required');
-  } else if (result === 'blocked_illegal') {
-    blockedIllegalCount++;
-    highlightPreviewRow(urlIndex, 'blocked_illegal');
-  } else {
-    failCount++;
-    highlightPreviewRow(urlIndex, 'fail');
-  }
+  countResult(urlIndex, result);
 
   pendingCount = totalCount - getProcessedCount();
   updateStatsUI();
   renderStats();
 
-  // 保存到本地存储
-  saveLocalResults();
+  saveBatchSnapshot();
 
   // 检查是否全部完成（成功 + 失败 + 已跳过 + 无评论框 >= 总数）
   const processedCount = getProcessedCount();
@@ -919,15 +911,76 @@ function checkAllCompleted(options = {}) {
   }
 }
 
-// 保存结果到本地存储
-function saveLocalResults() {
+// ==================== 本地任务快照 ====================
+// 文件、URL 列表、批次状态和全部结果保存在本机，重新打开批量页时恢复；上传新文件时清空
+const BATCH_SNAPSHOT_KEY = 'batch_state_snapshot';
+
+function saveBatchSnapshot() {
+  if (parsedUrls.length === 0) return;
   chrome.storage.local.set({
-    batchLocalResults: {
+    [BATCH_SNAPSHOT_KEY]: {
+      version: 1,
+      fileName: fileName.textContent,
+      fileCountText: fileCount.textContent,
+      duplicateText: document.getElementById('duplicateCount').textContent,
+      urls: parsedUrls.map((item) => ({ url: item.url, illegalCheck: item.illegalCheck || null })),
       batchId,
+      status,
       totalCount,
-      results: localResults.slice(-100) // 只保留最近100条
+      results: localResults,
+      savedAt: Date.now()
     }
   });
+}
+
+async function restoreBatchSnapshot() {
+  const data = await chrome.storage.local.get([BATCH_SNAPSHOT_KEY, 'batchResults']);
+  const snapshot = data[BATCH_SNAPSHOT_KEY];
+  if (!snapshot || !Array.isArray(snapshot.urls) || snapshot.urls.length === 0) return;
+
+  parsedUrls = [];
+  previewRows = new Map();
+  urlPreviewBody.innerHTML = '';
+  snapshot.urls.forEach(({ url, illegalCheck }, index) => {
+    parsedUrls.push({ originalIndex: index, url, sourceDomain: getDisplayDomain(url), illegalCheck: illegalCheck || null, originalRow: [url] });
+    urlPreviewBody.appendChild(createPreviewRow(index, url, { blocked: !!illegalCheck, ...(illegalCheck || {}) }));
+  });
+  urlPreview.classList.add('visible');
+  fileName.textContent = snapshot.fileName || '已上传文件';
+  fileCount.textContent = snapshot.fileCountText || `共 ${parsedUrls.length} 条 URL`;
+  document.getElementById('duplicateCount').textContent = snapshot.duplicateText || '';
+  fileInfo.classList.add('visible');
+  uploadZone.classList.add('has-file');
+
+  batchId = snapshot.batchId || null;
+  totalCount = snapshot.totalCount || 0;
+  localResults = Array.isArray(snapshot.results) ? snapshot.results : [];
+
+  // 批量页关闭期间由刷新后的页面确认、只落在 background 记录里的结果
+  const known = new Set(localResults.map((r) => r.originalIndex));
+  for (const r of Array.isArray(data.batchResults) ? data.batchResults : []) {
+    if (!batchId || r.batchId !== batchId || known.has(r.urlIndex) || !parsedUrls[r.urlIndex]) continue;
+    known.add(r.urlIndex);
+    localResults.push({
+      originalIndex: r.urlIndex, url: parsedUrls[r.urlIndex].url, sourceDomain: parsedUrls[r.urlIndex].sourceDomain,
+      result: r.result, aiContent: r.aiContent || null, errorMessage: r.errorMessage || null,
+      timestamp: r.timestamp || Date.now(), elapsed: null, originalRow: [parsedUrls[r.urlIndex].url]
+    });
+  }
+
+  successCount = failCount = skippedCount = noCommentBoxCount = manualRequiredCount = blockedIllegalCount = 0;
+  skippedIndices.clear();
+  for (const r of localResults) countResult(r.originalIndex, r.result);
+  pendingCount = Math.max(0, totalCount - getProcessedCount());
+
+  // 关闭页面时仍在运行的批次：标签页已失控，恢复为「已终止」，可点「重新开始」续跑
+  let restoredStatus = snapshot.status || 'idle';
+  if (restoredStatus === 'running') restoredStatus = 'terminated';
+  if (restoredStatus === 'terminated' && totalCount > 0 && getProcessedCount() >= totalCount) restoredStatus = 'completed';
+  isTerminated = restoredStatus === 'terminated' || restoredStatus === 'completed';
+  setStatus(restoredStatus);
+  updateStatsUI();
+  updateUI();
 }
 
 // 全部完成
@@ -1023,6 +1076,7 @@ function setStatus(s) {
     terminated: '已终止'
   }[s] || s;
   statusBadge.className = 'status-badge ' + s;
+  saveBatchSnapshot();
 }
 
 function updateUI() {
@@ -1141,9 +1195,12 @@ function resetBatchState() {
   filterResult.value = 'all';
   filterTimeRange.value = 'all';
   filterKeyword.value = '';
+  const staleKeys = ['batchLocalResults', BATCH_SETTINGS_KEY, BATCH_URLS_KEY, 'batchCtx', 'batchSubmitCtx'];
+  // 有新文件时由 setStatus 直接用新文件的快照覆盖；清空批次时删除快照
+  if (parsedUrls.length === 0) staleKeys.push(BATCH_SNAPSHOT_KEY);
+  chrome.storage.local.remove(staleKeys);
   setStatus('idle');
   updateUI();
-  chrome.storage.local.remove(['batchLocalResults', BATCH_SETTINGS_KEY, BATCH_URLS_KEY, 'batchCtx', 'batchSubmitCtx']);
 }
 
 // ==================== 统计面板 ====================
