@@ -8,9 +8,7 @@
     "storage"
   ],
   "host_permissions": [
-    "https://dashscope.aliyuncs.com/*",
-    "https://*.vercel.app/*",
-    "https://jieyunsang.cn/*"
+    "https://openrouter.ai/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -19,7 +17,7 @@
   "action": {
     "default_title": "Auto Register Filler - 网站自动填表与推广文案助手"
   },
-  "options_page": "options.html",
+  "options_page": "batch.html",
   "content_scripts": [
     {
       "matches": ["<all_urls>"],

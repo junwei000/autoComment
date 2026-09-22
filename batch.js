@@ -1,20 +1,17 @@
 // 批量外链评论自动化 - 扩展端核心逻辑（本地批次管理）
 
 // ==================== 配置 ====================
-const API_BASE = 'https://jieyunsang.cn/api';
-const BLOG_RUN_STATS_ENDPOINT = `${API_BASE}/blog-run-stats`;
+const { parseUrlCsv, normalizeUrl, getDisplayDomain } = window.AutoCommentBatchUtils;
 const POLL_INTERVAL = 3000;
 const TIMEOUT_CHECK_INTERVAL = 5000;
 const TIMEOUT_STORAGE_KEY = 'batch_timeout_seconds';
 
 // ==================== 状态 ====================
 let batchId = null;
-let userId = null;
 let parsedUrls = [];                // [{originalIndex, url}]
 let status = 'idle';                // idle | running | completed
 let activeTabCount = 0;
 let currentIndex = 0;               // 当前处理到的索引（本地管理）
-let initialPoints = 0;
 
 // 实时计数
 let totalCount = 0;
@@ -73,9 +70,8 @@ const progressText = document.getElementById('progressText');
 const footerActions = document.getElementById('footerActions');
 const exportBtn = document.getElementById('exportBtn');
 const clearBtn = document.getElementById('clearBtn');
-const pointsBalance = document.getElementById('pointsBalance');
-const pointsHint = document.getElementById('pointsHint');
-const costHint = document.getElementById('costHint');
+const settingsFields = Object.fromEntries(['apiKey', 'modelId', 'website', 'description', 'nickname', 'email'].map(id => [id, document.getElementById(id)]));
+const settingsStatus = document.getElementById('settingsStatus');
 const statusBadge = document.getElementById('statusBadge');
 const timeoutInput = document.getElementById('timeoutInput');
 const statsPanel = document.getElementById('statsPanel');
@@ -104,21 +100,16 @@ const BATCH_SETTINGS_KEY = 'batch_task_settings';
 const BATCH_URLS_KEY = 'batch_task_urls';
 const BATCH_DOMAIN_BLACKLIST = ['nsfw-ai.net'];
 
-// 全局勾选框设置的 storage.sync 键
+// 全局勾选框设置的本地存储键
 const BATCH_CHECKBOX_SETTINGS_KEY = 'batch_checkbox_settings';
 
 // 加载全局勾选框设置
 async function loadBatchCheckboxSettings() {
-  return new Promise((resolve) => {
-    chrome.storage.sync.get([BATCH_CHECKBOX_SETTINGS_KEY], (data) => {
-      const saved = data[BATCH_CHECKBOX_SETTINGS_KEY] || {};
-      batchAutoOpenPanel.checked = !!saved.autoOpenPanel;
-      batchAutoGenerate.checked = !!saved.autoGenerate;
-      batchAutoSubmit.checked = !!saved.autoSubmit;
-      console.log('[batch] 已加载全局勾选框设置:', saved);
-      resolve();
-    });
-  });
+  const data = await chrome.storage.local.get([BATCH_CHECKBOX_SETTINGS_KEY]);
+  const saved = data[BATCH_CHECKBOX_SETTINGS_KEY] || {};
+  batchAutoOpenPanel.checked = saved.autoOpenPanel !== false;
+  batchAutoGenerate.checked = saved.autoGenerate !== false;
+  batchAutoSubmit.checked = !!saved.autoSubmit;
 }
 
 // 保存全局勾选框设置
@@ -129,7 +120,7 @@ async function saveBatchCheckboxSettings() {
       autoGenerate: batchAutoGenerate.checked,
       autoSubmit: batchAutoSubmit.checked
     };
-    chrome.storage.sync.set({
+    chrome.storage.local.set({
       [BATCH_CHECKBOX_SETTINGS_KEY]: settings
     }, () => {
       console.log('[batch] 全局勾选框设置已保存:', settings);
@@ -142,8 +133,7 @@ async function saveBatchCheckboxSettings() {
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
-  await loadUserId();
-  await loadPoints();
+  await loadLocalSettings();
   await loadTimeoutSetting();
   await loadBatchCheckboxSettings(); // 全局记忆的勾选框设置
   bindEvents();
@@ -151,36 +141,43 @@ async function init() {
   updateUI();
 }
 
-async function loadUserId() {
-  return new Promise((resolve) => {
-    chrome.storage.sync.get(['auto_comment_user_id'], (data) => {
-      userId = data.auto_comment_user_id || '';
-      resolve();
-    });
-  });
+async function loadLocalSettings() {
+  const saved = await chrome.storage.local.get(['openrouter_api_key', 'openrouter_model', 'site_profile']);
+  settingsFields.apiKey.value = saved.openrouter_api_key || '';
+  settingsFields.modelId.value = saved.openrouter_model || '';
+  for (const id of ['website', 'description', 'nickname', 'email']) settingsFields[id].value = saved.site_profile?.[id] || '';
 }
 
-async function loadPoints() {
-  if (!userId) {
-    pointsBalance.textContent = '—';
-    return;
-  }
-  try {
-    const resp = await fetch(`${API_BASE}/get-points?userId=${encodeURIComponent(userId)}`);
-    const json = await resp.json();
-    if (json.success && json.points !== undefined) {
-      pointsBalance.textContent = json.points;
-    } else {
-      pointsBalance.textContent = '0';
+async function saveLocalSettings() {
+  const siteProfile = Object.fromEntries(['website', 'description', 'nickname', 'email'].map(id => [id, settingsFields[id].value.trim()]));
+  await chrome.storage.local.set({
+    openrouter_api_key: settingsFields.apiKey.value.trim(),
+    openrouter_model: settingsFields.modelId.value.trim(),
+    site_profile: siteProfile
+  });
+  settingsStatus.textContent = '设置已保存在此浏览器';
+}
+
+function validateSettings() {
+  for (const field of Object.values(settingsFields)) {
+    if (!field.value.trim() || !field.reportValidity()) {
+      field.focus();
+      settingsStatus.textContent = '请填写所有必填配置，并检查格式';
+      return false;
     }
-  } catch (e) {
-    pointsBalance.textContent = '—';
   }
+  if (!normalizeUrl(settingsFields.website.value)) {
+    settingsFields.website.focus();
+    settingsStatus.textContent = '网站 URL 必须是有效的 HTTP 或 HTTPS 地址';
+    return false;
+  }
+  settingsFields.website.value = normalizeUrl(settingsFields.website.value);
+  return true;
 }
 
 async function loadTimeoutSetting() {
   return new Promise((resolve) => {
-    chrome.storage.sync.get([TIMEOUT_STORAGE_KEY], (data) => {
+    chrome.storage.local.get([TIMEOUT_STORAGE_KEY], (data) => {
       const saved = parseInt(data[TIMEOUT_STORAGE_KEY], 10);
       timeoutSeconds = (saved && saved >= 10 && saved <= 600) ? saved : 60;
       timeoutInput.value = String(timeoutSeconds);
@@ -194,7 +191,7 @@ function saveTimeoutSetting() {
   const val = parseInt(timeoutInput.value, 10);
   if (val >= 10 && val <= 600) {
     timeoutSeconds = val;
-    chrome.storage.sync.set({ [TIMEOUT_STORAGE_KEY]: val });
+    chrome.storage.local.set({ [TIMEOUT_STORAGE_KEY]: val });
   } else {
     timeoutInput.value = String(timeoutSeconds);
   }
@@ -202,6 +199,10 @@ function saveTimeoutSetting() {
 
 // ==================== 事件绑定 ====================
 function bindEvents() {
+  for (const field of Object.values(settingsFields)) field.addEventListener('change', saveLocalSettings);
+  document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
+    if (validateSettings()) await saveLocalSettings();
+  });
   // 上传区域
   uploadZone.addEventListener('click', () => fileInput.click());
   uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
@@ -262,7 +263,8 @@ function handleFileSelect(e) {
 }
 
 function processFile(file) {
-  if (!file.name.endsWith('.csv')) {
+  if (status === 'running') return;
+  if (!file.name.toLowerCase().endsWith('.csv')) {
     alert('请上传 CSV 文件');
     return;
   }
@@ -345,50 +347,19 @@ function normalizeEncoding(arrayBuffer) {
 
 function parseCSV(raw, fileNameParam) {
   const text = normalizeEncoding(raw);
-  const lines = text.split(/\r?\n/).filter((line) => line.trim());
-  if (lines.length < 2) {
-    alert('CSV 文件内容为空或格式错误');
-    return;
-  }
-
-  // 去除 UTF-8 BOM（常见于从 Windows Excel 保存的文件）
-  const headerRaw = lines[0];
-  const header = parseCSVLine(headerRaw);
-  const colUrl = header.findIndex((h) => h === '原URL' || h === 'URL' || h === 'url' || h === 'Url');
-  const colDomain = header.findIndex((h) => h === 'URL对应域名' || h === '来源域名' || h === 'sourceDomain');
-
-  if (colUrl === -1) {
-    alert('CSV 文件缺少"原URL"列，请确认文件格式正确。\n\n标准格式应为：\n页面AS, 原URL, URL对应域名, 目标域名, 类型, 外部链接数量, 自动评论运行结果');
+  if (Papa.parse(text, { delimiter: ',', skipEmptyLines: true }).errors.length) {
     resetFile();
+    alert('CSV 格式错误，请检查引号是否完整');
     return;
   }
-
-  let validCount = 0;
-  let invalidCount = 0;
+  const { items, invalidCount, duplicateCount } = parseUrlCsv(text);
   let illegalCount = 0;
   let blacklistedCount = 0;
   parsedUrls = [];
   urlPreviewBody.innerHTML = '';
 
-  for (let i = 1; i < lines.length; i++) {
-    const row = parseCSVLine(lines[i]);
-    let url = (row[colUrl] || '').trim();
-    let sourceDomain = colDomain >= 0 ? (row[colDomain] || '').trim() : '';
-
-    if (!url) {
-      invalidCount++;
-      continue;
-    }
-
-    if (!/^https?:\/\//i.test(url)) {
-      url = 'https://' + url;
-    }
-
-    if (!isValidUrl(url)) {
-      invalidCount++;
-      continue;
-    }
-
+  for (const url of items) {
+    const sourceDomain = getDisplayDomain(url);
     if (isBatchDomainBlacklisted(url, sourceDomain)) {
       blacklistedCount++;
       continue;
@@ -404,9 +375,8 @@ function parseCSV(raw, fileNameParam) {
       url,
       sourceDomain,
       illegalCheck: illegalCheck.blocked ? illegalCheck : null,
-      originalRow: row  // 保存原始行数据，用于导出时保持格式
+      originalRow: [url]
     });
-    validCount++;
 
     const tr = document.createElement('tr');
     tr.dataset.url = url;
@@ -414,22 +384,12 @@ function parseCSV(raw, fileNameParam) {
       tr.classList.add('illegal');
       tr.title = getIllegalSiteBlockMessage(illegalCheck);
     }
-    tr.innerHTML = `<td>${parsedUrls.length}</td><td>${escapeHtml(sourceDomain || url)}</td><td>${escapeHtml(url)}</td>`;
+    tr.title = illegalCheck.blocked ? `${url}\n${getIllegalSiteBlockMessage(illegalCheck)}` : url;
+    tr.innerHTML = `<td>${parsedUrls.length}</td><td>${escapeHtml(sourceDomain)}</td>`;
     urlPreviewBody.appendChild(tr);
   }
 
-  // 检测重复
-  const seenUrls = new Set();
-  let duplicateCount = 0;
-  urlPreviewBody.querySelectorAll('tr').forEach((tr) => {
-    const url = tr.dataset.url;
-    if (seenUrls.has(url)) {
-      tr.classList.add('duplicate');
-      duplicateCount++;
-    }
-    seenUrls.add(url);
-  });
-
+  const validCount = parsedUrls.length;
   urlPreview.classList.add('visible');
   fileName.textContent = fileNameParam || '已上传文件';
   fileInfo.classList.add('visible');
@@ -439,39 +399,15 @@ function parseCSV(raw, fileNameParam) {
   if (illegalCount > 0) fileCount.textContent += `（非法拦截 ${illegalCount} 条）`;
   if (blacklistedCount > 0) fileCount.textContent += `（跳过 ${blacklistedCount} 条黑名单域名）`;
   if (duplicateCount > 0) {
-    fileCount.textContent += `（发现 ${duplicateCount} 条重复）`;
-    document.getElementById('duplicateCount').textContent = `⚠️ ${duplicateCount} 条重复`;
+    fileCount.textContent += `（去重 ${duplicateCount} 条）`;
   }
-  updateCostHint(Math.max(0, validCount - illegalCount));
-  startBtn.disabled = validCount === 0;
-}
-
-function parseCSVLine(line) {
-  const result = [];
-  let current = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (char === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        current += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (char === ',' && !inQuotes) {
-      result.push(current.trim());
-      current = '';
-    } else {
-      current += char;
-    }
-  }
-  result.push(current.trim());
-  return result;
+  document.getElementById('duplicateCount').textContent = duplicateCount ? `已去重 ${duplicateCount} 条` : '';
+  if (!validCount) alert('CSV 中没有有效 URL，请检查第一列');
+  updateUI();
 }
 
 function resetFile() {
+  if (status === 'running') return;
   fileInput.value = '';
   fileInfo.classList.remove('visible');
   uploadZone.classList.remove('has-file');
@@ -481,28 +417,17 @@ function resetFile() {
   startBtn.disabled = true;
   fileCount.textContent = '';
   document.getElementById('duplicateCount').textContent = '';
-  updateCostHint(0);
-}
-
-function updateCostHint(count) {
-  if (count === 0) {
-    costHint.textContent = '';
-  } else {
-    costHint.textContent = `本次预计消耗 ${count} 条积分`;
-  }
 }
 
 // ==================== 批量处理核心 ====================
 async function startBatch() {
-  if (!userId) {
-    alert('请先在设置页面中配置用户 ID');
-    return;
-  }
+  if (!validateSettings()) return;
   if (parsedUrls.length === 0) {
     alert('请先上传有效的 CSV 文件');
     return;
   }
 
+  await saveLocalSettings();
   await new Promise((resolve) => {
     chrome.storage.local.remove(['batchCtx', 'batchSubmitCtx'], resolve);
   });
@@ -510,7 +435,6 @@ async function startBatch() {
   // 保存批量任务设置和 URL 列表到 storage.local，供 content.js 读取
   await saveBatchTaskSettings();
 
-  initialPoints = parseInt(pointsBalance.textContent || '0', 10);
   batchId = generateUUID();
   totalCount = parsedUrls.length;
   successCount = 0;
@@ -612,6 +536,9 @@ async function stopBatch() {
 
 // 恢复处理（从终止状态继续）
 async function resumeBatch() {
+  if (!validateSettings()) return;
+  await saveLocalSettings();
+  await saveBatchTaskSettings();
   console.log('[resumeBatch] 开始恢复处理', { status, currentIndex, totalCount, successCount, failCount });
 
   if (status !== 'terminated') {
@@ -839,8 +766,6 @@ function handleTabResult(urlIndex, result, aiContent, errorMessage, forcedElapse
 
   localResults.push(resultEntry);
 
-  reportBlogRunStatsIfNeeded(item, result);
-
   if (result === 'success') {
     successCount++;
     highlightPreviewRow(urlIndex, 'success');
@@ -884,72 +809,6 @@ function handleTabResult(urlIndex, result, aiContent, errorMessage, forcedElapse
     shouldComplete: processedCount >= totalCount
   });
   checkAllCompleted(options);
-}
-
-function reportBlogRunStatsIfNeeded(item, result) {
-  if (result !== 'success' && result !== 'manual_required') return;
-
-  const payload = buildBlogRunStatsPayload(item, result);
-  if (!payload.urlDomain) return;
-
-  try {
-    fetch(BLOG_RUN_STATS_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      keepalive: true
-    }).then((response) => {
-      if (!response.ok) {
-        console.warn('[batch] blog-run-stats 上报失败:', response.status, payload);
-      }
-    }).catch((error) => {
-      console.warn('[batch] blog-run-stats 上报异常:', error, payload);
-    });
-  } catch (error) {
-    console.warn('[batch] blog-run-stats 上报启动失败:', error, payload);
-  }
-}
-
-function buildBlogRunStatsPayload(item, result) {
-  const row = Array.isArray(item && item.originalRow) ? item.originalRow : [];
-  const originalUrl = (item && item.url) || normalizeUrlForStats(row[1]);
-  const urlDomain = normalizeDomainForStats(row[2] || (item && item.sourceDomain) || extractDomain(originalUrl));
-  const targetDomain = normalizeDomainForStats(row[3]);
-
-  return {
-    pageAs: normalizeStatValue(row[0]),
-    originalUrl,
-    urlDomain,
-    targetDomain,
-    type: normalizeStatValue(row[4]),
-    externalLinkCount: parseIntegerForStats(row[5]),
-    validationResult: result === 'success' ? 1 : 2
-  };
-}
-
-function normalizeStatValue(value) {
-  return String(value || '').trim();
-}
-
-function normalizeUrlForStats(value) {
-  const text = normalizeStatValue(value);
-  if (!text) return '';
-  return /^https?:\/\//i.test(text) ? text : `https://${text}`;
-}
-
-function normalizeDomainForStats(value) {
-  const text = normalizeStatValue(value);
-  if (!text) return '';
-  try {
-    return new URL(normalizeUrlForStats(text)).hostname.replace(/^www\./i, '').toLowerCase();
-  } catch (_) {
-    return text.replace(/^www\./i, '').toLowerCase();
-  }
-}
-
-function parseIntegerForStats(value) {
-  const parsed = parseInt(String(value || '').replace(/[^\d-]/g, ''), 10);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 // background 通知：结果已落盘，可以安全关闭标签页了
@@ -1047,21 +906,6 @@ async function onAllCompleted() {
     try {
       chrome.tabs.remove(tabId, () => {});
     } catch (_) {}
-  }
-
-  // 通过积分差值计算成功/失败数（备用验证）
-  let finalPoints = initialPoints;
-  try {
-    const resp = await fetch(`${API_BASE}/get-points?userId=${encodeURIComponent(userId)}`);
-    const json = await resp.json();
-    if (json.success && json.points !== undefined) {
-      finalPoints = json.points;
-    }
-  } catch (_) {}
-
-  const pointsDiff = initialPoints - finalPoints;
-  if (pointsDiff > 0 && Math.abs(pointsDiff - successCount) > 2) {
-    console.warn(`积分差值(${pointsDiff})与成功数(${successCount})不一致，请以实际结果为准`);
   }
 
   updateStatsUI();
@@ -1181,27 +1025,7 @@ function exportResults() {
     return;
   }
 
-  // 查找第一条有原始行数据的结果来确定导入格式
-  const sampleResult = localResults.find((r) => r.originalRow && r.originalRow.length > 0);
-  if (!sampleResult) {
-    alert('缺少导入数据，无法按原始格式导出');
-    return;
-  }
-
-  const originalRowLen = getExportSourceColumnCount(sampleResult.originalRow);
-
-  // 根据原始列数生成表头，保持与导入格式一致，最后加"运行结果"
-  const originalHeaders = [];
-  for (let i = 0; i < originalRowLen; i++) {
-    if (i === 0) originalHeaders.push('页面AS');
-    else if (i === 1) originalHeaders.push('原URL');
-    else if (i === 2) originalHeaders.push('URL对应域名');
-    else if (i === 3) originalHeaders.push('目标域名');
-    else if (i === 4) originalHeaders.push('类型');
-    else if (i === 5) originalHeaders.push('外部链接数量');
-    else originalHeaders.push(`列${i + 1}`);
-  }
-  const header = [...originalHeaders, '运行结果'].join(',');
+  const header = 'URL,序号,站点,结果,错误信息,AI 生成内容,耗时（秒）,时间';
 
   const escape = (val) => {
     if (val == null) return '';
@@ -1213,13 +1037,7 @@ function exportResults() {
   };
 
   const rows = localResults.map((r) => {
-    // 基础列：页面AS=原序号-1，其他列从原始数据中取
-    const baseCols = [];
-    for (let i = 0; i < originalRowLen; i++) {
-      baseCols.push(escape(r.originalRow[i] || ''));
-    }
-    const runResult = getExportRunResult(r.result);
-    return [...baseCols, runResult].join(',');
+    return [r.url, r.originalIndex + 1, getDisplayDomain(r.url), getResultText(r.result), r.errorMessage, r.aiContent, r.elapsed, new Date(r.timestamp).toISOString()].map(escape).join(',');
   });
 
   const csv = [header, ...rows].join('\n');
@@ -1232,26 +1050,6 @@ function exportResults() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-}
-
-function getExportSourceColumnCount(originalRow) {
-  const len = originalRow.length;
-  if (len <= 0) return 0;
-
-  const lastValue = String(originalRow[len - 1] || '').trim();
-  const knownResultValues = new Set(['√', '×', '需手动处理', '成功', '失败', '非法站点，已拦截']);
-  if (knownResultValues.has(lastValue)) {
-    return len - 1;
-  }
-
-  return len;
-}
-
-function getExportRunResult(result) {
-  if (result === 'success' || result === 'skipped') return '√';
-  if (result === 'manual_required') return '需手动处理';
-  if (result === 'blocked_illegal') return '非法站点，已拦截';
-  return '×';
 }
 
 function clearBatch() {
@@ -1330,11 +1128,7 @@ function buildDomainOptions() {
 }
 
 function extractDomain(url) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return '';
-  }
+  return getDisplayDomain(url);
 }
 
 function normalizeBatchDomain(value) {
@@ -1426,7 +1220,6 @@ function renderStats() {
 
     const elapsedStr = r.elapsed != null ? r.elapsed + 's' : '—';
     const timeStr = r.timestamp ? formatTime(new Date(r.timestamp)) : '—';
-    const shortUrl = r.url.length > 40 ? r.url.substring(0, 37) + '…' : r.url;
 
     const indexCell = document.createElement('td');
     indexCell.textContent = r.originalIndex + 1;
@@ -1435,7 +1228,7 @@ function renderStats() {
     tr.appendChild(indexCell);
 
     const urlCell = document.createElement('td');
-    urlCell.textContent = shortUrl;
+    urlCell.textContent = getDisplayDomain(r.url);
     urlCell.title = r.url;
     tr.appendChild(urlCell);
 

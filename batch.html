@@ -2,7 +2,8 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <title>批量外链评论 - Auto Register Filler</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>批量评论 - AutoComment</title>
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -16,7 +17,7 @@
       }
 
       .container {
-        max-width: 700px;
+        max-width: 1440px;
         margin: 0 auto;
       }
 
@@ -615,19 +616,20 @@
         margin-bottom: 10px;
       }
 
-      /* 积分信息 */
-      .points-bar {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-size: 12px;
-        color: #6b7280;
-      }
-
-      .points-bar .balance {
-        font-weight: 700;
-        color: #2563eb;
-        font-size: 14px;
+      .settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px 24px; }
+      .settings-grid label { display:flex; flex-direction:column; gap:7px; font-size:13px; font-weight:500; }
+      .settings-grid input, .settings-grid textarea { width:100%; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; font:inherit; }
+      .settings-grid textarea { min-height:88px; resize:vertical; }
+      .settings-grid input:focus, .settings-grid textarea:focus { outline:2px solid #93c5fd; border-color:#2563eb; }
+      .settings-actions { display:flex; align-items:center; gap:14px; margin-top:16px; }
+      .workspace-grid { display:grid; grid-template-columns:minmax(0, 1.5fr) minmax(320px, 1fr); gap:16px; align-items:start; }
+      .workspace-grid .card { min-width:0; }
+      .stats-table-wrap { overflow-x:auto; }
+      .stats-table { min-width:1050px; }
+      @media (max-width:800px) {
+        body { padding:12px; }
+        .settings-grid, .workspace-grid { grid-template-columns:1fr; }
+        .card { padding:18px; }
       }
     </style>
   </head>
@@ -635,10 +637,38 @@
     <div class="container">
 
       <!-- 标题区 -->
-      <h1>批量外链评论</h1>
-      <div class="subtitle">上传 CSV 文件，批量打开目标页面，自动发送评论并记录结果</div>
+      <h1>AutoComment · 批量评论</h1>
+      <div class="subtitle">配置你的 OpenRouter 模型，导入站点列表，逐页生成评论并记录结果。</div>
 
+      <section class="card" aria-labelledby="settingsTitle">
+        <h2 class="card-title" id="settingsTitle">模型与网站配置</h2>
+        <div class="settings-grid">
+          <label for="apiKey">OpenRouter API Key *
+            <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-or-…" required />
+          </label>
+          <label for="modelId">OpenRouter 模型 ID *
+            <input id="modelId" type="text" autocomplete="off" spellcheck="false" placeholder="provider/model-name" required />
+          </label>
+          <label for="website">推广网站 URL *
+            <input id="website" type="text" inputmode="url" placeholder="https://example.com" required />
+          </label>
+          <label for="description">网站介绍 *
+            <textarea id="description" placeholder="简要说明网站内容及它对读者的帮助" required></textarea>
+          </label>
+          <label for="nickname">评论昵称 *
+            <input id="nickname" type="text" autocomplete="nickname" required />
+          </label>
+          <label for="email">评论邮箱 *
+            <input id="email" type="email" autocomplete="email" required />
+          </label>
+        </div>
+        <div class="settings-actions">
+          <button class="btn btn-secondary" id="saveSettingsBtn" type="button">保存配置</button>
+          <span class="hint" id="settingsStatus" role="status">配置仅保存在此浏览器。Key 由插件后台用于调用 OpenRouter。</span>
+        </div>
+      </section>
 
+      <div class="workspace-grid">
       <!-- 文件上传区 -->
       <div class="card">
         <div class="card-title">上传 CSV 文件</div>
@@ -664,8 +694,7 @@
             <thead>
               <tr>
                 <th>#</th>
-                <th>来源域名</th>
-                <th>目标页面</th>
+                <th>站点</th>
               </tr>
             </thead>
             <tbody id="urlPreviewBody"></tbody>
@@ -673,8 +702,8 @@
         </div>
 
         <div class="hint" style="margin-top:10px">
-          CSV 文件需包含"原URL"列，标准格式为：<br/>
-          页面AS, 原URL, URL对应域名, 目标域名, 类型, 外部链接数量, 自动评论运行结果
+          只读取第一列 URL，其余列忽略。可使用 url 表头，也可直接从第一行开始填写地址。<br />
+          无协议地址自动补充 https://；无效地址跳过，重复地址自动去重。悬停站点可查看完整 URL。
         </div>
       </div>
 
@@ -725,18 +754,13 @@
           <span style="font-size:12px;color:#9ca3af;">范围 10~600 秒</span>
         </div>
       </div>
+      </div>
 
-      <!-- 积分信息 -->
       <div class="card">
-        <div class="card-title">积分消耗</div>
         <div class="current-status">
           当前状态：<span class="status-badge idle" id="statusBadge">空闲</span>
         </div>
-        <div class="points-bar">
-          当前积分余额：<span class="balance" id="pointsBalance">—</span>
-          <span id="pointsHint" style="color:#9ca3af"></span>
-        </div>
-        <div id="costHint" class="hint warn" style="display:none; margin-top:8px;"></div>
+        <p class="hint">每次只处理一个站点；模型调用费用由你的 OpenRouter 账户承担。</p>
       </div>
 
       <!-- 操作按钮 -->
@@ -849,7 +873,7 @@
             <thead>
               <tr>
                 <th>#</th>
-                <th>目标页面</th>
+                <th>站点</th>
                 <th>结果</th>
                 <th>错误信息</th>
                 <th>AI 生成内容</th>
@@ -871,6 +895,7 @@
     </div>
 
     <script src="lib/papaparse.min.js"></script>
+    <script src="lib/batch-utils.js"></script>
     <script src="illegal-site-filter.js"></script>
     <script src="batch.js"></script>
   </body>
