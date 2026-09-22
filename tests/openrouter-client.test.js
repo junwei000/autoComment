@@ -4,7 +4,7 @@ const { buildOpenRouterRequest, parseOpenRouterResponse } = require('../lib/open
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-function loadBackground(payload, { networkError = false, configured = true } = {}) {
+function loadBackground(payload, { networkError = false, configured = true, sequence = null } = {}) {
   const listeners = [];
   const requests = [];
   const tabs = [];
@@ -15,8 +15,13 @@ function loadBackground(payload, { networkError = false, configured = true } = {
     runtime: { getURL: (path) => `chrome-extension://test/${path}`, onMessage: { addListener: (fn) => listeners.push(fn) } },
     storage: { local: { get: async () => configured ? { openrouter_api_key: key, openrouter_model: 'provider/test-model' } : {} } }
   };
-  const context = { chrome, console, AbortSignal, AutoCommentOpenRouter: { buildOpenRouterRequest, parseOpenRouterResponse }, fetch: async (url, options) => {
+  const context = { chrome, console, AbortSignal, setTimeout: (fn) => fn(), AutoCommentOpenRouter: { buildOpenRouterRequest, parseOpenRouterResponse }, fetch: async (url, options) => {
     requests.push({ url, options });
+    if (sequence) {
+      const step = sequence[Math.min(requests.length - 1, sequence.length - 1)];
+      if (step === 'network') throw new Error(key);
+      return { ok: step.status < 400, status: step.status, json: async () => step.body };
+    }
     if (networkError) throw new Error(key);
     return { ok: !payload?.error, status: payload?.error ? 401 : 200, json: async () => payload };
   } };
@@ -128,4 +133,46 @@ test('connection test is only accepted from extension pages', async () => {
   const result = await app.send({ type: 'OPENROUTER_TEST' }, { url: 'https://evil.example/', tab: { id: 1 } });
   assert.equal(result.ok, false);
   assert.equal(app.requests.length, 0);
+});
+
+const okReply = { status: 200, body: { choices: [{ message: { content: 'Great point about soil.' } }] } };
+
+test('generation retries twice after transient failures and succeeds on the third try', async () => {
+  const app = loadBackground(null, { sequence: [{ status: 503, body: { error: { message: 'busy' } } }, 'network', okReply] });
+  const result = await app.send({ type: 'OPENROUTER_GENERATE', pageContext: {}, siteProfile: {} });
+  assert.equal(result.ok, true);
+  assert.equal(result.text, 'Great point about soil.');
+  assert.equal(app.requests.length, 3);
+});
+
+test('generation gives up after three attempts and reports the last error', async () => {
+  const app = loadBackground(null, { sequence: [{ status: 429, body: { error: { message: 'Rate limited' } } }] });
+  const result = await app.send({ type: 'OPENROUTER_GENERATE', pageContext: {}, siteProfile: {} });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /429/);
+  assert.match(result.error, /已重试 2 次/);
+  assert.equal(app.requests.length, 3);
+});
+
+test('empty model output is retried too', async () => {
+  const app = loadBackground(null, { sequence: [{ status: 200, body: { choices: [{ message: { content: ' ' } }] } }, okReply] });
+  const result = await app.send({ type: 'OPENROUTER_GENERATE', pageContext: {}, siteProfile: {} });
+  assert.equal(result.ok, true);
+  assert.equal(app.requests.length, 2);
+});
+
+for (const status of [401, 402, 403]) {
+  test(`generation does not retry ${status}`, async () => {
+    const app = loadBackground(null, { sequence: [{ status, body: { error: { message: 'no' } } }] });
+    const result = await app.send({ type: 'OPENROUTER_GENERATE', pageContext: {}, siteProfile: {} });
+    assert.equal(result.ok, false);
+    assert.equal(app.requests.length, 1);
+  });
+}
+
+test('connection test does not retry', async () => {
+  const app = loadBackground(null, { sequence: [{ status: 503, body: { error: { message: 'busy' } } }] });
+  const result = await app.send({ type: 'OPENROUTER_TEST' }, extensionPage);
+  assert.equal(result.ok, false);
+  assert.equal(app.requests.length, 1);
 });

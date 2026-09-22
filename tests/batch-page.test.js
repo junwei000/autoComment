@@ -45,14 +45,18 @@ test('missing required configuration focuses the field and blocks starting', () 
   assert.equal(app.elements.get('apiKey').focused, true);
 });
 
-test('CSV accepts one headerless row, ignores extra columns, removes duplicates and previews hostname', () => {
+const rowText = (row) => row.children.map((cell) => cell.textContent).join(' | ');
+
+test('CSV accepts one headerless row, ignores extra columns, removes duplicates and previews the full URL', () => {
   const app = page();
   app.run(`parseCSV(new TextEncoder().encode(${JSON.stringify('Example.com/article,ignore.test\nhttps://example.com/article,else.test\n')}).buffer, 'urls.csv')`);
   assert.equal(app.run('parsedUrls.length'), 1);
   assert.equal(app.run('parsedUrls[0].url'), 'https://example.com/article');
   assert.match(app.elements.get('fileCount').textContent, /去重 1/);
-  assert.match(app.elements.get('urlPreviewBody').children[0].innerHTML, /example.com/);
-  assert.doesNotMatch(app.elements.get('urlPreviewBody').children[0].innerHTML, /ignore.test|else.test/);
+  const row = app.elements.get('urlPreviewBody').children[0];
+  assert.equal(row.children[1].textContent, 'https://example.com/article');
+  assert.equal(row.children[2].textContent, '待处理');
+  assert.doesNotMatch(rowText(row), /ignore.test|else.test/);
 });
 
 test('empty CSV and unclosed quotes produce useful errors', () => {
@@ -116,4 +120,17 @@ test('connection test shows provider errors and requires key and model first', a
   app.elements.get('modelId').value = 'provider/model';
   await app.run('testOpenRouterConnection()');
   assert.match(app.elements.get('testConnectionStatus').textContent, /连接失败.*401/);
+});
+
+test('preview rows show processing, then keep a success mark after the task completes', () => {
+  const app = page();
+  app.run("parseCSV(new TextEncoder().encode('a.example/post\\nb.example/post').buffer, 'urls.csv')");
+  const [first, second] = app.elements.get('urlPreviewBody').children;
+  app.run("highlightPreviewRow(0, 'processing')");
+  assert.equal(first.children[2].textContent, '处理中');
+  app.run("parsedUrls[0].url; totalCount = 2; status = 'running'; handleTabResult(0, 'success', 'Nice post', null, 3)");
+  assert.equal(first.children[2].textContent, 'success');
+  assert.equal(first.className, 'url-done-success');
+  app.run("handleTabResult(1, 'fail', null, 'boom', 2)");
+  assert.equal(second.children[2].textContent, '失败');
 });

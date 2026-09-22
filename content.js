@@ -760,32 +760,62 @@
       console.log('[AutoComment] 提交上下文不属于当前页面或已过期，忽略');
       return;
     }
+    // 等刷新后的页面完全加载（load 事件）再确认
+    await waitForDocumentComplete();
     const ctx = await takeBatchSubmitContext();
     if (!ctx) return;
-    console.log('[AutoComment] 提交后页面已刷新，确认成功:', confirm);
+    console.log('[AutoComment] 提交后页面已加载完成，确认成功:', confirm);
     await sendBatchConfirm(confirm);
   }
 
-  // 点击提交后等待：页面刷新交给新页面确认；10 秒内未刷新则直接确认成功
-  async function waitForSubmitCompletion(batchId, urlIndex, url, aiContent) {
-    const waiter = submissionHelpers.createSubmissionWaiter({
-      timeoutMs: submissionHelpers.SUBMIT_TIMEOUT_MS,
-      addNavigationListener(listener) {
-        window.addEventListener('beforeunload', listener);
-        window.addEventListener('pagehide', listener);
-      },
-      removeNavigationListener(listener) {
-        window.removeEventListener('beforeunload', listener);
-        window.removeEventListener('pagehide', listener);
-      },
+  function waitForDocumentComplete() {
+    if (document.readyState === 'complete') return Promise.resolve();
+    return new Promise((resolve) => window.addEventListener('load', resolve, { once: true }));
+  }
+
+  // 必须在点击提交之前开始监听，否则会漏掉点击时同步发出的提交请求。
+  // 页面自己的 fetch/XHR 由 lib/request-tracker.js（页面主环境）通过 DOM 事件转告。
+  function watchSubmitActivity() {
+    const monitor = submissionHelpers.createSubmitMonitor({
       setTimer: (callback, ms) => setTimeout(callback, ms),
       clearTimer: (id) => clearTimeout(id)
     });
-    const reason = await waiter.wait();
+    const onRequest = (event) => {
+      let info;
+      try { info = JSON.parse(event.detail); } catch (_) { return; }
+      if (!info || !info.id) return;
+      if (info.phase === 'start') monitor.requestStarted(info.id);
+      else if (info.phase === 'end') monitor.requestEnded(info.id);
+    };
+    const onNavigate = () => monitor.navigated();
+    window.addEventListener('autocomment:request', onRequest);
+    window.addEventListener('beforeunload', onNavigate);
+    window.addEventListener('pagehide', onNavigate);
+    const cleanup = () => {
+      window.removeEventListener('autocomment:request', onRequest);
+      window.removeEventListener('beforeunload', onNavigate);
+      window.removeEventListener('pagehide', onNavigate);
+    };
+    return {
+      wait: () => monitor.wait().finally(cleanup),
+      dispose: () => { monitor.dispose(); cleanup(); }
+    };
+  }
+
+  // 点击提交后等待结果：
+  // - 页面跳转：交给新页面在加载完成后确认
+  // - 提交请求完成（或 10 秒内无任何请求/跳转）：确认成功
+  // - 请求 30 秒仍未完成：记为失败
+  async function waitForSubmitCompletion(watch, batchId, urlIndex, url, aiContent) {
+    const reason = await watch.wait();
     console.log('[content] 提交等待结束:', reason);
-    if (reason !== 'timeout') return;
+    if (reason === 'navigation' || reason === 'disposed') return;
     const ctx = await takeBatchSubmitContext();
     if (!ctx) return;
+    if (reason === 'max-timeout') {
+      await sendBatchConfirm({ batchId, urlIndex, url: url || '', result: 'fail', aiContent, errorMessage: '提交请求 30 秒内未完成' });
+      return;
+    }
     await sendBatchConfirm({ batchId, urlIndex, url: url || '', result: 'success', aiContent, errorMessage: null });
   }
 
@@ -3613,13 +3643,15 @@
       await persistBatchSubmitContext(batchId, urlIndex, url, aiContent);
 
       console.log('[content] 7/7 点击提交按钮...');
+      const submitWatch = watchSubmitActivity();
       const clickResult = await clickCommentSubmitButton();
       console.log('[content] 点击结果:', clickResult);
       if (!clickResult.success) {
+        submitWatch.dispose();
         throw new Error(clickResult.error || '提交按钮点击失败');
       }
 
-      await waitForSubmitCompletion(batchId, urlIndex, url, aiContent);
+      await waitForSubmitCompletion(submitWatch, batchId, urlIndex, url, aiContent);
       console.log('[content] handleBatchTask 完成 <<<', { batchId, urlIndex });
     } catch (err) {
       console.warn('[content] handleBatchTask 捕获错误:', err.message);

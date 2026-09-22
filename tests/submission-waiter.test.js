@@ -1,78 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createSubmissionWaiter, createSubmitContext, readRestoredSubmitContext, SUBMIT_TIMEOUT_MS } = require('../lib/submission-waiter');
-
-function createControlledWaiter() {
-  let navigationListener;
-  let timerCallback;
-  const calls = { add: 0, remove: 0, clear: 0 };
-
-  return {
-    waiter: createSubmissionWaiter({
-      timeoutMs: 10_000,
-      addNavigationListener(listener) {
-        calls.add += 1;
-        navigationListener = listener;
-      },
-      removeNavigationListener(listener) {
-        calls.remove += 1;
-        assert.equal(listener, navigationListener);
-      },
-      setTimer(callback, timeoutMs) {
-        assert.equal(timeoutMs, 10_000);
-        timerCallback = callback;
-        return 'timer-id';
-      },
-      clearTimer(timerId) {
-        calls.clear += 1;
-        assert.equal(timerId, 'timer-id');
-      }
-    }),
-    calls,
-    triggerNavigation() {
-      navigationListener();
-    },
-    triggerTimeout() {
-      timerCallback();
-    }
-  };
-}
-
-test('wait resolves with navigation and cleans up when navigation arrives first', async () => {
-  const controlled = createControlledWaiter();
-  const waiting = controlled.waiter.wait();
-
-  controlled.triggerNavigation();
-
-  assert.equal(await waiting, 'navigation');
-  assert.deepEqual(controlled.calls, { add: 1, remove: 1, clear: 1 });
-});
-
-test('wait resolves with timeout and cleans up when the timeout arrives first', async () => {
-  const controlled = createControlledWaiter();
-  const waiting = controlled.waiter.wait();
-
-  controlled.triggerTimeout();
-
-  assert.equal(await waiting, 'timeout');
-  assert.deepEqual(controlled.calls, { add: 1, remove: 1, clear: 1 });
-});
-
-test('wait resolves exactly once when navigation and timeout both fire', async () => {
-  const controlled = createControlledWaiter();
-  const waiting = controlled.waiter.wait();
-
-  controlled.triggerNavigation();
-  controlled.triggerTimeout();
-
-  assert.equal(await waiting, 'navigation');
-  assert.deepEqual(controlled.calls, { add: 1, remove: 1, clear: 1 });
-});
-
-test('post-submit timeout is exactly 10 seconds', () => {
-  assert.equal(SUBMIT_TIMEOUT_MS, 10_000);
-});
+const { createSubmitContext, readRestoredSubmitContext } = require('../lib/submission-waiter');
 
 test('createSubmitContext persists everything the restored page needs to confirm', () => {
   const ctx = createSubmitContext({ batchId: 'b1', urlIndex: 3, url: 'https://blog.example/post', aiContent: 'Nice post' }, 1000);
@@ -92,4 +21,104 @@ test('restored context is ignored on other sites, when stale, or when malformed'
   assert.equal(readRestoredSubmitContext(ctx, 'https://blog.example/post', 1000 + 5 * 60 * 1000), null);
   assert.equal(readRestoredSubmitContext(null, 'https://blog.example/post', 2000), null);
   assert.equal(readRestoredSubmitContext({ ...ctx, urlIndex: undefined }, 'https://blog.example/post', 2000), null);
+});
+
+const { createSubmitMonitor, SUBMIT_MONITOR_DEFAULTS } = require('../lib/submission-waiter');
+
+function fakeClock() {
+  let now = 0;
+  let nextId = 1;
+  const timers = new Map();
+  return {
+    setTimer(callback, ms) { const id = nextId++; timers.set(id, { at: now + ms, callback }); return id; },
+    clearTimer(id) { timers.delete(id); },
+    advance(ms) {
+      const target = now + ms;
+      for (;;) {
+        const due = [...timers.entries()].filter(([, t]) => t.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        timers.delete(due[0]);
+        now = due[1].at;
+        due[1].callback();
+      }
+      now = target;
+    },
+    pending: () => timers.size
+  };
+}
+
+function monitor(clock) {
+  return createSubmitMonitor({ idleMs: 10_000, quietMs: 1_000, maxMs: 30_000, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+}
+
+test('submit monitor defaults: 10s idle, 1s quiet, 30s cap', () => {
+  assert.deepEqual(SUBMIT_MONITOR_DEFAULTS, { idleMs: 10_000, quietMs: 1_000, maxMs: 30_000 });
+});
+
+test('submit monitor waits for the submit request to finish, then a quiet period', async () => {
+  const clock = fakeClock();
+  const m = monitor(clock);
+  let reason = null;
+  m.wait().then((r) => { reason = r; });
+  m.requestStarted('r1');
+  clock.advance(12_000); // well past the idle window, request still in flight
+  await Promise.resolve();
+  assert.equal(reason, null);
+  m.requestEnded('r1');
+  clock.advance(999);
+  await Promise.resolve();
+  assert.equal(reason, null);
+  clock.advance(1);
+  await Promise.resolve();
+  assert.equal(reason, 'requests-settled');
+  assert.equal(clock.pending(), 0);
+});
+
+test('a follow-up request during the quiet period extends the wait', async () => {
+  const clock = fakeClock();
+  const m = monitor(clock);
+  let reason = null;
+  m.wait().then((r) => { reason = r; });
+  m.requestStarted('r1');
+  m.requestEnded('r1');
+  clock.advance(500);
+  m.requestStarted('r2');
+  clock.advance(2_000);
+  await Promise.resolve();
+  assert.equal(reason, null);
+  m.requestEnded('r2');
+  clock.advance(1_000);
+  await Promise.resolve();
+  assert.equal(reason, 'requests-settled');
+});
+
+test('navigation wins immediately and later events are ignored', async () => {
+  const clock = fakeClock();
+  const m = monitor(clock);
+  const waiting = m.wait();
+  m.requestStarted('r1');
+  m.navigated();
+  m.requestEnded('r1');
+  clock.advance(60_000);
+  assert.equal(await waiting, 'navigation');
+  assert.equal(clock.pending(), 0);
+});
+
+test('no request and no navigation within 10s resolves as no-activity', async () => {
+  const clock = fakeClock();
+  const m = monitor(clock);
+  const waiting = m.wait();
+  clock.advance(10_000);
+  assert.equal(await waiting, 'no-activity');
+});
+
+test('a request that never finishes resolves as max-timeout after 30s', async () => {
+  const clock = fakeClock();
+  const m = monitor(clock);
+  const waiting = m.wait();
+  clock.advance(2_000);
+  m.requestStarted('hang');
+  clock.advance(28_000);
+  assert.equal(await waiting, 'max-timeout');
+  assert.equal(clock.pending(), 0);
 });

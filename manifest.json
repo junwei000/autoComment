@@ -24,6 +24,16 @@
         "<all_urls>"
       ],
       "js": [
+        "lib/request-tracker.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
         "illegal-site-filter.js",
         "lib/submission-waiter.js",
         "content.js"

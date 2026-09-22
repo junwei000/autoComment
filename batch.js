@@ -391,6 +391,7 @@ function parseCSV(raw, fileNameParam) {
   let illegalCount = 0;
   let blacklistedCount = 0;
   parsedUrls = [];
+  previewRows = new Map();
   urlPreviewBody.innerHTML = '';
 
   for (const url of items) {
@@ -413,15 +414,7 @@ function parseCSV(raw, fileNameParam) {
       originalRow: [url]
     });
 
-    const tr = document.createElement('tr');
-    tr.dataset.url = url;
-    if (illegalCheck.blocked) {
-      tr.classList.add('illegal');
-      tr.title = getIllegalSiteBlockMessage(illegalCheck);
-    }
-    tr.title = illegalCheck.blocked ? `${url}\n${getIllegalSiteBlockMessage(illegalCheck)}` : url;
-    tr.innerHTML = `<td>${parsedUrls.length}</td><td>${escapeHtml(sourceDomain)}</td>`;
-    urlPreviewBody.appendChild(tr);
+    urlPreviewBody.appendChild(createPreviewRow(parsedUrls.length - 1, url, illegalCheck));
   }
 
   const validCount = parsedUrls.length;
@@ -450,6 +443,7 @@ function resetFile() {
   urlPreview.classList.remove('visible');
   urlPreviewBody.innerHTML = '';
   parsedUrls = [];
+  previewRows = new Map();
   startBtn.disabled = true;
   fileCount.textContent = '';
   document.getElementById('duplicateCount').textContent = '';
@@ -693,7 +687,6 @@ async function openNextTab() {
             handleTabResult(urlIndex, 'fail', null, '用户手动关闭', elapsed);
           } else {
             console.log('[batch] 标签关闭已有结果:', urlIndex);
-            clearPreviewRow(urlIndex);
           }
 
           updateStatsUI();
@@ -1140,30 +1133,55 @@ function resetBatchState() {
 
 // ==================== 统计面板 ====================
 
-// 从 parsedUrls 找到对应行（用 data-url 属性查找）
-function findPreviewRowByIndex(urlIndex) {
-  const { url } = parsedUrls[urlIndex] || {};
-  if (!url) return null;
-  const rows = urlPreviewBody.querySelectorAll('tr');
-  for (const row of rows) {
-    if (row.dataset.url === url) return row;
-  }
-  return null;
+// 待处理列表的行：urlIndex -> { row, statusCell, baseClass }
+let previewRows = new Map();
+
+const PREVIEW_STATE_CLASS = {
+  processing: 'url-processing',
+  success: 'url-done-success',
+  fail: 'url-done-fail',
+  no_comment_box: 'url-done-fail',
+  skipped: 'url-done-skipped',
+  manual_required: 'url-done-skipped',
+  blocked_illegal: 'url-done-blocked'
+};
+
+function getPreviewStatusText(state) {
+  if (!state) return '待处理';
+  if (state === 'processing') return '处理中';
+  if (state === 'success') return 'success';
+  return getResultText(state);
+}
+
+function createPreviewRow(urlIndex, url, illegalCheck) {
+  const row = document.createElement('tr');
+  row.dataset.url = url;
+  row.title = illegalCheck.blocked ? `${url}\n${getIllegalSiteBlockMessage(illegalCheck)}` : url;
+  const baseClass = illegalCheck.blocked ? 'illegal' : '';
+  row.className = baseClass;
+
+  const indexCell = document.createElement('td');
+  indexCell.textContent = String(urlIndex + 1);
+  const urlCell = document.createElement('td');
+  urlCell.className = 'url-full';
+  urlCell.textContent = url;
+  const statusCell = document.createElement('td');
+  statusCell.className = 'url-status';
+  statusCell.textContent = getPreviewStatusText(null);
+  row.appendChild(indexCell);
+  row.appendChild(urlCell);
+  row.appendChild(statusCell);
+
+  previewRows.set(urlIndex, { row, statusCell, baseClass });
+  return row;
 }
 
 function highlightPreviewRow(urlIndex, state) {
-  const row = findPreviewRowByIndex(urlIndex);
-  if (!row) return;
-  row.classList.remove('url-processing', 'url-done-success', 'url-done-fail', 'url-done-skipped', 'url-done-blocked');
-  if (state === 'processing') row.classList.add('url-processing');
-  else if (state === 'success') row.classList.add('url-done-success');
-  else if (state === 'fail') row.classList.add('url-done-fail');
-  else if (state === 'skipped' || state === 'manual_required') row.classList.add('url-done-skipped');
-  else if (state === 'blocked_illegal') row.classList.add('url-done-blocked');
-}
-
-function clearPreviewRow(urlIndex) {
-  highlightPreviewRow(urlIndex, null);
+  const entry = previewRows.get(urlIndex);
+  if (!entry) return;
+  const stateClass = PREVIEW_STATE_CLASS[state] || '';
+  entry.row.className = [entry.baseClass, stateClass].filter(Boolean).join(' ');
+  entry.statusCell.textContent = getPreviewStatusText(state);
 }
 
 function buildDomainOptions() {

@@ -23,13 +23,18 @@ function redactCredential(value, apiKey) {
   return value.split(apiKey).join('[已隐藏 API Key]');
 }
 
+// Key 无效、余额不足、无权限时重试没有意义
+const NON_RETRIABLE_STATUS = new Set([401, 402, 403]);
+// AI 生成失败后再重试两次，间隔递增
+const GENERATION_RETRY_DELAYS_MS = [1000, 2000];
+
 async function callOpenRouter(messages) {
   let apiKey = '';
   try {
     const settings = await chrome.storage.local.get(['openrouter_api_key', 'openrouter_model']);
     apiKey = typeof settings.openrouter_api_key === 'string' ? settings.openrouter_api_key.trim() : '';
-    if (!apiKey) return { ok: false, error: '请配置 OpenRouter API Key' };
-    if (!settings.openrouter_model?.trim()) return { ok: false, error: '请配置 OpenRouter 模型 ID' };
+    if (!apiKey) return { ok: false, error: '请配置 OpenRouter API Key', retriable: false };
+    if (!settings.openrouter_model?.trim()) return { ok: false, error: '请配置 OpenRouter 模型 ID', retriable: false };
     const request = AutoCommentOpenRouter.buildOpenRouterRequest({ apiKey, model: settings.openrouter_model, messages });
     const response = await fetch(request.url, { ...request.options, signal: AbortSignal.timeout(60000) });
     const payload = await response.json().catch(() => null);
@@ -37,16 +42,27 @@ async function callOpenRouter(messages) {
     const model = typeof payload?.model === 'string' ? payload.model : settings.openrouter_model.trim();
     return result.ok
       ? { ok: true, text: redactCredential(result.text, apiKey), model }
-      : { ok: false, error: redactCredential(result.error, apiKey) };
+      : { ok: false, error: redactCredential(result.error, apiKey), retriable: !NON_RETRIABLE_STATUS.has(response.status) };
   } catch (_) {
     // Network/provider exceptions may contain request headers. Never expose them.
-    return { ok: false, error: 'OpenRouter 请求失败或超时，请检查网络及配置' };
+    return { ok: false, error: 'OpenRouter 请求失败或超时，请检查网络及配置', retriable: true };
   }
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function generateComment(message) {
-  const result = await callOpenRouter(buildCommentMessages(message.pageContext || {}, message.siteProfile || {}));
-  return result.ok ? { ok: true, text: result.text } : result;
+  const messages = buildCommentMessages(message.pageContext || {}, message.siteProfile || {});
+  let result = await callOpenRouter(messages);
+  let retries = 0;
+  while (!result.ok && result.retriable && retries < GENERATION_RETRY_DELAYS_MS.length) {
+    await sleep(GENERATION_RETRY_DELAYS_MS[retries]);
+    retries++;
+    console.warn(`[background] AI 生成失败，第 ${retries} 次重试:`, result.error);
+    result = await callOpenRouter(messages);
+  }
+  if (result.ok) return { ok: true, text: result.text };
+  return { ok: false, error: retries > 0 ? `${result.error}（已重试 ${retries} 次）` : result.error };
 }
 
 const CONNECTION_TEST_MESSAGES = [
@@ -56,7 +72,7 @@ const CONNECTION_TEST_MESSAGES = [
 
 async function testConnection() {
   const startedAt = Date.now();
-  const result = await callOpenRouter(CONNECTION_TEST_MESSAGES);
+  const { retriable, ...result } = await callOpenRouter(CONNECTION_TEST_MESSAGES);
   return { ...result, elapsedMs: Date.now() - startedAt };
 }
 
