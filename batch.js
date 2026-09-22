@@ -335,17 +335,24 @@ function resetUrlList() {
 
 // ==================== 批量处理核心 ====================
 async function startBatch() {
-  if (!validateSettings()) return;
+  if (isStartingBatch || !validateSettings()) return;
   if (parsedUrls.length === 0) {
     showUrlSummary('请先输入 URL 并点击「加载到待处理列表」', 'error');
     urlInput.focus();
     return;
   }
 
-  await saveLocalSettings();
-  await new Promise((resolve) => {
-    chrome.storage.local.remove(['batchCtx', 'batchSubmitCtx'], resolve);
-  });
+  isStartingBatch = true;
+  startBtn.disabled = true;
+  try {
+    await saveLocalSettings();
+    await closeOrphanTabs();
+    await new Promise((resolve) => {
+      chrome.storage.local.remove(['batchCtx', 'batchSubmitCtx'], resolve);
+    });
+  } finally {
+    isStartingBatch = false;
+  }
 
   batchId = generateUUID();
   totalCount = parsedUrls.length;
@@ -370,6 +377,21 @@ async function startBatch() {
 
 // 终止标志：stopBatch 后保持 results 但不再处理
 let isTerminated = false;
+// 开始/继续处理的异步准备阶段，用于防止重复点击
+let isStartingBatch = false;
+// 批量页刷新前仍打开着的任务标签页（刷新后已不受控），继续处理前先关闭
+let orphanTabIds = [];
+
+function closeOrphanTabs() {
+  const ids = orphanTabIds;
+  orphanTabIds = [];
+  return Promise.all(ids.map((tabId) => new Promise((resolve) => {
+    chrome.tabs.remove(tabId, () => {
+      void chrome.runtime.lastError; // 标签页可能已被手动关闭
+      resolve();
+    });
+  })));
+}
 
 async function stopBatch() {
   // 停止继续打开新标签页
@@ -417,8 +439,16 @@ async function stopBatch() {
 
 // 恢复处理（从终止状态继续）
 async function resumeBatch() {
-  if (!validateSettings()) return;
-  await saveLocalSettings();
+  // 防止连点：保存配置期间状态仍是 terminated，第二次点击会再开一个标签页
+  if (isStartingBatch || !validateSettings()) return;
+  isStartingBatch = true;
+  startBtn.disabled = true;
+  try {
+    await saveLocalSettings();
+    await closeOrphanTabs();
+  } finally {
+    isStartingBatch = false;
+  }
   console.log('[resumeBatch] 开始恢复处理', { status, currentIndex, totalCount, successCount, failCount });
 
   if (status !== 'terminated') {
@@ -506,10 +536,19 @@ async function openNextTab() {
     return;
   }
 
+  // 同步占位：chrome.tabs.create 是异步的，必须在创建前就计数，否则空档期内会被再开一个
+  activeTabCount++;
   try {
-    chrome.tabs.create({ url, active: true }, (tab) => {
-      activeTabCount++;
+    await new Promise((resolveCreated) => chrome.tabs.create({ url, active: true }, (tab) => {
+      resolveCreated();
+      if (!tab) {
+        activeTabCount = Math.max(0, activeTabCount - 1);
+        handleTabResult(urlIndex, 'fail', null, '无法打开标签页');
+        if (status === 'running' && currentIndex < totalCount) setTimeout(openNextTabSync, 0);
+        return;
+      }
       activeTabs.set(tab.id, { urlIndex, ...createTabTimer(Date.now()) });
+      saveBatchSnapshot(); // 记下打开的标签页，批量页刷新后可以找到并关闭它
       activeTabsByIndex.set(urlIndex, { urlIndex, startTime: Date.now() });
 
       // 高亮预览表格中对应的行
@@ -521,12 +560,14 @@ async function openNextTab() {
       // 监听标签页关闭
       const listener = (tabId, removeInfo) => {
         if (tabId === tab.id) {
+          chrome.tabs.onRemoved.removeListener(listener);
+          // 停止/完成时已统一释放的标签页：关闭事件可能晚到，不能再扣计数或打开下一个
+          if (!activeTabs.has(tab.id)) return;
           // 取 startTime（必须在删除前获取）
           const startTime = activeTabs.get(tab.id)?.startTime;
           activeTabs.delete(tab.id);
           activeTabsByIndex.delete(urlIndex);
           activeTabCount = Math.max(0, activeTabCount - 1);
-          chrome.tabs.onRemoved.removeListener(listener);
 
           console.log('[batch] 标签页关闭:', { tabId, urlIndex, activeTabCount, status });
 
@@ -607,9 +648,10 @@ async function openNextTab() {
         });
       }
       sendWhenReady(tab.id);
-    });
+    }));
   } catch (e) {
     console.error('[batch] openNextTab 错误:', e);
+    activeTabCount = Math.max(0, activeTabCount - 1);
     // 出错时继续下一个
     if (currentIndex < totalCount) {
       setTimeout(openNextTabSync, 1000);
@@ -775,6 +817,7 @@ function saveBatchSnapshot() {
       status,
       totalCount,
       results: localResults,
+      openTabIds: [...activeTabs.keys()],
       savedAt: Date.now()
     }
   });
@@ -799,6 +842,7 @@ async function restoreBatchSnapshot() {
 
   batchId = snapshot.batchId || null;
   totalCount = snapshot.totalCount || 0;
+  orphanTabIds = Array.isArray(snapshot.openTabIds) ? snapshot.openTabIds : [];
   localResults = Array.isArray(snapshot.results) ? snapshot.results : [];
 
   // 批量页关闭期间由刷新后的页面确认、只落在 background 记录里的结果
@@ -887,8 +931,7 @@ async function checkTimeouts() {
     }
   }
   for (const { tabId, urlIndex, message } of toRemove) {
-    activeTabs.delete(tabId);
-    activeTabsByIndex.delete(urlIndex);
+    // 只记结果并关闭；释放计数和打开下一个交给该标签页的关闭事件
     handleTabResult(urlIndex, 'fail', null, message);
     try {
       await new Promise((resolve) => {

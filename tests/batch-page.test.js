@@ -14,10 +14,17 @@ function page({ runtimeReply, stored: initialStore } = {}) {
   const sent = [];
   const element = () => ({ value: '', checked: false, textContent: '', innerHTML: '', dataset: {}, style: {}, disabled: false, children: [], classList: { add() {}, remove() {} }, addEventListener() {}, appendChild(child) { this.children.push(child); }, querySelectorAll() { return []; }, focus() { this.focused = true; }, reportValidity() { return true; } });
   const context = {
-    console, TextDecoder, TextEncoder, Uint8Array, URL, setTimeout, clearTimeout,
+    console, TextDecoder, TextEncoder, Uint8Array, URL, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
     window: { AutoCommentBatchUtils: utils },
     document: { getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element, addEventListener() {} },
-    chrome: { tabs: { remove: (id, cb) => { cb && cb(); } }, runtime: { sendMessage: async (message) => { sent.push(message); return runtimeReply; } }, storage: { local: { get: async () => stored, set: async (value) => Object.assign(stored, value), remove: async (keys) => keys.forEach(key => delete stored[key]) } } },
+    chrome: { tabs: {
+      created: [], removed: [], removedListeners: [], nextId: 100,
+      create(options, cb) { const tab = { id: this.nextId++, url: options.url }; this.created.push(tab); setTimeout(() => cb(tab), 5); },
+      remove(id, cb) { this.removed.push(id); cb && cb(); },
+      sendMessage: () => new Promise(() => {}),
+      onRemoved: { addListener(fn) { context.chrome.tabs.removedListeners.push(fn); }, removeListener(fn) { const l = context.chrome.tabs.removedListeners; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); } },
+      fireRemoved(id) { [...this.removedListeners].forEach((fn) => fn(id, {})); }
+    }, runtime: { sendMessage: async (message) => { sent.push(message); return runtimeReply; } }, storage: { local: { get: async () => stored, set: async (value) => Object.assign(stored, value), remove: async (keys) => keys.forEach(key => delete stored[key]) } } },
     alert: (message) => alerts.push(message)
   };
   vm.createContext(context);
@@ -268,4 +275,81 @@ test('clearing the batch removes the snapshot', async () => {
   await app.run('stopBatch()');
   app.run('clearBatch()');
   assert.equal(app.stored.batch_state_snapshot, undefined);
+});
+
+const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function stoppedBatch(app) {
+  for (const id of ['apiKey', 'modelId', 'website', 'description', 'nickname', 'email']) app.elements.get(id).value = id === 'website' ? 'https://mine.example' : id === 'email' ? 'me@mine.example' : 'x';
+  app.run(load('https://a.example/1\nhttps://a.example/2\nhttps://a.example/3'));
+  app.run(`batchId = 'b1'; totalCount = 3; pendingCount = 3; setStatus('running');`);
+  app.run("handleTabResult(0, 'success', 'ok', null, 1)");
+  app.run("isTerminated = true; setStatus('terminated'); currentIndex = 1;");
+}
+
+test('clicking 继续处理 twice quickly still opens only one tab', async () => {
+  const app = page();
+  stoppedBatch(app);
+  app.run('resumeBatch(); resumeBatch();');
+  await tick();
+  assert.equal(app.run('chrome.tabs.created.length'), 1);
+  assert.equal(app.run('chrome.tabs.created[0].url'), 'https://a.example/2');
+});
+
+test('back-to-back open requests before the tab exists open only one tab', async () => {
+  const app = page();
+  stoppedBatch(app);
+  app.run("isTerminated = false; setStatus('running'); openNextTabSync(); openNextTabSync(); setTimeout(openNextTabSync, 0);");
+  await tick();
+  assert.equal(app.run('chrome.tabs.created.length'), 1);
+  assert.equal(app.run('activeTabCount'), 1);
+});
+
+test('a tab closed by 停止 does not open another tab after 继续处理', async () => {
+  const app = page();
+  stoppedBatch(app);
+  app.run("isTerminated = false; setStatus('running'); openNextTabSync();");
+  await tick();
+  const firstTab = app.run('chrome.tabs.created[0].id');
+  await app.run('stopBatch()');
+  app.run('resumeBatch()');
+  await tick();
+  // the close event of the stopped tab arrives late
+  app.run(`chrome.tabs.fireRemoved(${firstTab})`);
+  await tick();
+  assert.equal(app.run('chrome.tabs.created.length'), 2, 'one tab before stop, one after continue');
+  assert.equal(app.run('activeTabCount'), 1);
+});
+
+test('tabs left open when the batch page was reloaded are closed before continuing', async () => {
+  const first = page();
+  stoppedBatch(first);
+  first.run("isTerminated = false; setStatus('running'); openNextTabSync();");
+  await tick();
+  const orphan = first.run('chrome.tabs.created[0].id');
+
+  const second = page({ stored: clone(first.stored) });
+  for (const id of ['apiKey', 'modelId', 'website', 'description', 'nickname', 'email']) second.elements.get(id).value = id === 'website' ? 'https://mine.example' : id === 'email' ? 'me@mine.example' : 'x';
+  await second.run('restoreBatchSnapshot()');
+  await second.run('resumeBatch()');
+  await tick();
+  assert.deepEqual(second.run('chrome.tabs.removed'), [orphan]);
+  assert.equal(second.run('chrome.tabs.created.length'), 1);
+});
+
+test('after a page timeout the tab is closed and the next URL opens', async () => {
+  const app = page();
+  stoppedBatch(app);
+  app.run("isTerminated = false; setStatus('running'); timeoutSeconds = 60; openNextTabSync();");
+  await tick();
+  const tabId = app.run('chrome.tabs.created[0].id');
+  app.run(`activeTabs.get(${tabId}).startTime = Date.now() - 61000`);
+  await app.run('checkTimeouts()');
+  assert.deepEqual(app.run('chrome.tabs.removed'), [tabId]);
+  assert.equal(app.run('localResults.find((r) => r.originalIndex === 1).errorMessage'), '处理超时（等待页面加载阶段）');
+  app.run(`chrome.tabs.fireRemoved(${tabId})`);
+  await tick();
+  assert.equal(app.run('chrome.tabs.created.length'), 2);
+  assert.equal(app.run('chrome.tabs.created[1].url'), 'https://a.example/3');
+  assert.equal(app.run('activeTabCount'), 1);
 });
