@@ -72,3 +72,51 @@ test('getDisplayDomain returns the lowercase hostname including www', () => {
   assert.equal(getDisplayDomain('https://WWW.Example.COM:8080/path'), 'www.example.com');
   assert.equal(getDisplayDomain('invalid URL'), '');
 });
+
+const { createTabTimer, setTabPhase, evaluateTabTimeout, getPhaseLabel, PHASE_BUDGETS_MS } = require('../lib/batch-utils');
+
+test('AI generation budget covers three 60s attempts plus retry delays; submit budget covers 30s request cap plus reload', () => {
+  assert.ok(PHASE_BUDGETS_MS.generating >= 3 * 60_000 + 3_000);
+  assert.ok(PHASE_BUDGETS_MS.submitting >= 30_000 + 20_000);
+});
+
+test('page timeout counts loading and comment-box search from tab open', () => {
+  const timer = createTabTimer(0);
+  setTabPhase(timer, 'finding', 20_000);
+  assert.deepEqual(evaluateTabTimeout(timer, 59_000, 60_000), { timedOut: false });
+  assert.deepEqual(evaluateTabTimeout(timer, 61_000, 60_000), { timedOut: true, message: '处理超时（查找评论框阶段）' });
+});
+
+test('time spent waiting for AI does not count against the page timeout', () => {
+  const timer = createTabTimer(0);
+  setTabPhase(timer, 'generating', 40_000);
+  // 90s into AI generation: well past the 60s page timeout, but AI has its own budget
+  assert.deepEqual(evaluateTabTimeout(timer, 130_000, 60_000), { timedOut: false });
+  setTabPhase(timer, 'filling', 130_000);
+  // only 40s (before AI) + 15s (after AI) counted
+  assert.deepEqual(evaluateTabTimeout(timer, 145_000, 60_000), { timedOut: false });
+  assert.deepEqual(evaluateTabTimeout(timer, 151_000, 60_000), { timedOut: true, message: '处理超时（填写表单阶段）' });
+});
+
+test('AI generation that exceeds its own budget times out with a specific message', () => {
+  const timer = createTabTimer(0);
+  setTabPhase(timer, 'generating', 10_000);
+  const result = evaluateTabTimeout(timer, 10_000 + PHASE_BUDGETS_MS.generating + 1, 60_000);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.message, `AI 生成超时（${PHASE_BUDGETS_MS.generating / 1000} 秒）`);
+});
+
+test('submitting has its own budget too', () => {
+  const timer = createTabTimer(0);
+  setTabPhase(timer, 'submitting', 50_000);
+  assert.deepEqual(evaluateTabTimeout(timer, 50_000 + PHASE_BUDGETS_MS.submitting - 1, 60_000), { timedOut: false });
+  assert.equal(evaluateTabTimeout(timer, 50_000 + PHASE_BUDGETS_MS.submitting + 1, 60_000).message, `提交超时（${PHASE_BUDGETS_MS.submitting / 1000} 秒）`);
+});
+
+test('unknown phases are ignored and labels are readable', () => {
+  const timer = createTabTimer(0);
+  setTabPhase(timer, 'bogus', 1_000);
+  assert.equal(timer.phase, 'loading');
+  assert.equal(getPhaseLabel('generating'), 'AI 生成中');
+  assert.equal(getPhaseLabel('loading'), '等待页面加载');
+});

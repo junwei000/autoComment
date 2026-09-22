@@ -1,7 +1,7 @@
 // 批量外链评论自动化 - 扩展端核心逻辑（本地批次管理）
 
 // ==================== 配置 ====================
-const { parseUrlCsv, normalizeUrl, getDisplayDomain } = window.AutoCommentBatchUtils;
+const { parseUrlCsv, normalizeUrl, getDisplayDomain, createTabTimer, setTabPhase, evaluateTabTimeout, getPhaseLabel } = window.AutoCommentBatchUtils;
 const POLL_INTERVAL = 3000;
 const TIMEOUT_CHECK_INTERVAL = 5000;
 const TIMEOUT_STORAGE_KEY = 'batch_timeout_seconds';
@@ -29,7 +29,7 @@ let localResults = [];              // [{originalIndex, url, result, aiContent, 
 // 轮询定时器
 let pollTimer = null;
 
-// 活跃标签页记录 { tabId -> { urlIndex, startTime } }
+// 活跃标签页记录 { tabId -> { urlIndex, ...createTabTimer() } }（按阶段计时）
 let activeTabs = new Map();
 let activeTabsByIndex = new Map();  // urlIndex -> { urlIndex, startTime }
 
@@ -274,6 +274,8 @@ function bindEvents() {
     if (message.type === 'BATCH_CONFIRMED') {
       console.log('[batch] 收到 BATCH_CONFIRMED >>>', { urlIndex: message.urlIndex, result: message.result, aiContentLen: message.aiContent ? message.aiContent.length : 0, tabsPendingConfirm: [...tabsPendingConfirm.entries()], tabsWaitingClose: [...tabsWaitingClose], time: new Date().toISOString() });
       handleTabConfirmed(message.urlIndex, message.result, message.aiContent, message.errorMessage);
+    } else if (message.type === 'BATCH_PHASE') {
+      handleBatchPhase(message);
     }
   });
 
@@ -659,7 +661,7 @@ async function openNextTab() {
   try {
     chrome.tabs.create({ url, active: true }, (tab) => {
       activeTabCount++;
-      activeTabs.set(tab.id, { urlIndex, startTime: Date.now() });
+      activeTabs.set(tab.id, { urlIndex, ...createTabTimer(Date.now()) });
       activeTabsByIndex.set(urlIndex, { urlIndex, startTime: Date.now() });
 
       // 高亮预览表格中对应的行
@@ -981,20 +983,33 @@ async function checkTimeouts() {
   const now = Date.now();
   const toRemove = [];
   for (const [tabId, info] of activeTabs) {
-    const elapsed = (now - info.startTime) / 1000;
-    if (elapsed > timeoutSeconds) {
-      toRemove.push({ tabId, urlIndex: info.urlIndex });
+    const verdict = evaluateTabTimeout(info, now, timeoutSeconds * 1000);
+    if (verdict.timedOut) {
+      toRemove.push({ tabId, urlIndex: info.urlIndex, message: verdict.message });
     }
   }
-  for (const { tabId, urlIndex } of toRemove) {
+  for (const { tabId, urlIndex, message } of toRemove) {
     activeTabs.delete(tabId);
     activeTabsByIndex.delete(urlIndex);
-    handleTabResult(urlIndex, 'fail', null, '处理超时');
+    handleTabResult(urlIndex, 'fail', null, message);
     try {
       await new Promise((resolve) => {
         chrome.tabs.remove(tabId, () => resolve());
       });
     } catch (_) {}
+  }
+}
+
+// content.js 上报当前阶段：AI 生成/提交阶段暂停单页计时，并在列表里显示进度
+function handleBatchPhase(message) {
+  if (!message || message.batchId !== batchId) return;
+  for (const info of activeTabs.values()) {
+    if (info.urlIndex !== message.urlIndex) continue;
+    setTabPhase(info, message.phase, Date.now());
+    const label = getPhaseLabel(info.phase);
+    const entry = previewRows.get(message.urlIndex);
+    if (entry && label) entry.statusCell.textContent = `处理中 · ${label}`;
+    return;
   }
 }
 

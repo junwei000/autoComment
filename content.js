@@ -717,6 +717,12 @@
 
   const submissionHelpers = window.AutoCommentSubmissionWaiter;
 
+  // 通知批量页当前阶段（AI 生成/提交阶段不计入单页超时）
+  function reportBatchPhase(batchId, urlIndex, phase) {
+    if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
+    chrome.runtime.sendMessage({ type: 'BATCH_PHASE', batchId, urlIndex, phase }).catch(() => {});
+  }
+
   function sendBatchConfirm(payload) {
     if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) {
       return Promise.resolve(null);
@@ -3537,6 +3543,7 @@
         return;
       }
       console.log('[content] 3/6 确认评论表单存在...');
+      reportBatchPhase(batchId, urlIndex, 'finding');
       // 先尝试触发评论表单展开（如果表单是隐藏的需要点击回复链接）
       let form = findCommentForm();
       let ta = findLikelyCommentTextarea({ allowGenericFallback: false });
@@ -3597,10 +3604,12 @@
         console.log('[content] 4/6 复用已有推广文案，跳过AI生成，长度:', aiContent.length);
       } else {
         console.log('[content] 4/6 生成AI文案...');
+        reportBatchPhase(batchId, urlIndex, 'generating');
         aiContent = await generatePromotionCopy();
       }
       console.log('[content] AI文案生成完成，长度:', aiContent ? aiContent.length : 0, aiContent ? aiContent.substring(0, 80) + '...' : 'null');
       console.log('[content] 5/6 填充表单字段...');
+      reportBatchPhase(batchId, urlIndex, 'filling');
       const manualFillResult = tryFillCommentTextareaWithPromotion(aiContent);
       console.log('[content] BATCH_HANDLE 手动按钮同款填充结果:', manualFillResult);
       // AI 生成完成后再次确认评论框存在（表单可能通过3懒加载在生成期间加载好）
@@ -3643,6 +3652,7 @@
       await persistBatchSubmitContext(batchId, urlIndex, url, aiContent);
 
       console.log('[content] 7/7 点击提交按钮...');
+      reportBatchPhase(batchId, urlIndex, 'submitting');
       const submitWatch = watchSubmitActivity();
       const clickResult = await clickCommentSubmitButton();
       console.log('[content] 点击结果:', clickResult);

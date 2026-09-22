@@ -14,7 +14,7 @@ function page({ runtimeReply } = {}) {
     console, TextDecoder, TextEncoder, Uint8Array, URL, setTimeout, clearTimeout, Papa: require('../lib/papaparse.min.js'),
     window: { AutoCommentBatchUtils: utils },
     document: { getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element, addEventListener() {} },
-    chrome: { runtime: { sendMessage: async (message) => { sent.push(message); return runtimeReply; } }, storage: { local: { get: async () => stored, set: async (value) => Object.assign(stored, value), remove: async (keys) => keys.forEach(key => delete stored[key]) } } },
+    chrome: { tabs: { remove: (id, cb) => { cb && cb(); } }, runtime: { sendMessage: async (message) => { sent.push(message); return runtimeReply; } }, storage: { local: { get: async () => stored, set: async (value) => Object.assign(stored, value), remove: async (keys) => keys.forEach(key => delete stored[key]) } } },
     alert: (message) => alerts.push(message)
   };
   vm.createContext(context);
@@ -133,4 +133,40 @@ test('preview rows show processing, then keep a success mark after the task comp
   assert.equal(first.className, 'url-done-success');
   app.run("handleTabResult(1, 'fail', null, 'boom', 2)");
   assert.equal(second.children[2].textContent, '失败');
+});
+
+test('a tab waiting on AI is not killed by the page timeout, and shows the phase', async () => {
+  const app = page();
+  app.run("parseCSV(new TextEncoder().encode('a.example/post').buffer, 'urls.csv')");
+  app.run(`
+    batchId = 'b1'; totalCount = 1; status = 'running'; timeoutSeconds = 60;
+    activeTabs.set(7, { urlIndex: 0, ...window.AutoCommentBatchUtils.createTabTimer(Date.now() - 100000) });
+  `);
+  app.run("handleBatchPhase({ type: 'BATCH_PHASE', batchId: 'b1', urlIndex: 0, phase: 'generating' })");
+  const row = app.elements.get('urlPreviewBody').children[0];
+  assert.equal(row.children[2].textContent, '处理中 · AI 生成中');
+  // 100s since open, but the AI phase started just now: page timeout is paused
+  await app.run('checkTimeouts()');
+  assert.equal(app.run('localResults.length'), 0);
+  assert.equal(app.run('activeTabs.has(7)'), true);
+});
+
+test('page timeout reports the phase that stalled', async () => {
+  const app = page();
+  app.run("parseCSV(new TextEncoder().encode('a.example/post').buffer, 'urls.csv')");
+  app.run(`
+    batchId = 'b1'; totalCount = 1; status = 'running'; timeoutSeconds = 60;
+    activeTabs.set(7, { urlIndex: 0, ...window.AutoCommentBatchUtils.createTabTimer(Date.now() - 61000) });
+  `);
+  app.run("handleBatchPhase({ type: 'BATCH_PHASE', batchId: 'b1', urlIndex: 0, phase: 'finding' })");
+  await app.run('checkTimeouts()');
+  assert.equal(app.run('localResults[0].errorMessage'), '处理超时（查找评论框阶段）');
+});
+
+test('phase messages from another batch are ignored', () => {
+  const app = page();
+  app.run("parseCSV(new TextEncoder().encode('a.example/post').buffer, 'urls.csv')");
+  app.run(`batchId = 'b1'; activeTabs.set(7, { urlIndex: 0, ...window.AutoCommentBatchUtils.createTabTimer(Date.now()) });`);
+  app.run("handleBatchPhase({ type: 'BATCH_PHASE', batchId: 'old', urlIndex: 0, phase: 'generating' })");
+  assert.equal(app.run('activeTabs.get(7).phase'), 'loading');
 });
