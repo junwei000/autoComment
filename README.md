@@ -1,6 +1,6 @@
 # AutoComment
 
-Chrome (Manifest V3) 扩展：导入一批博客文章 URL，逐页识别评论框，用你自己的 OpenRouter 模型生成与文章相关的评论，填写昵称/邮箱/网站并（可选）自动提交。
+Chrome (Manifest V3) 扩展：导入一批博客文章 URL，逐页识别评论框，用你自己的 OpenRouter 模型生成与文章相关的评论，填写昵称/邮箱/网站并自动提交。
 
 插件完全在本地运行，不依赖任何私有后端，没有账号、积分或付费功能。
 
@@ -59,6 +59,7 @@ https://another.example.org/article/123
 
 ## 隐私与安全
 
+- 插件只在批量任务打开的标签页里操作页面；平时浏览的网页不会被自动填表，也不会被注入任何按钮或浮窗。
 - 只有扩展后台（`background.js`）会访问网络，且只访问 `https://openrouter.ai/api/v1/chat/completions`。
 - 发送给 OpenRouter 的内容：当前页面 URL、标题、描述、截断后的正文摘要，以及你填写的网站 URL 和介绍。OpenRouter 及下游模型提供方如何处理这些数据，请参阅它们的隐私政策。
 - API Key 只放在请求的 `Authorization` 头里，不会返回给页面脚本，也不会写入结果或导出文件；错误信息中若回显 Key 会被替换。

@@ -37,3 +37,12 @@ test('package has no runtime dependencies and only OpenRouter host access', () =
   assert.equal(pkg.devDependencies, undefined);
   assert.deepEqual(manifest.host_permissions, ['https://openrouter.ai/*']);
 });
+
+test('no page widgets or global auto-fill are injected into ordinary pages', () => {
+  const content = fs.readFileSync(path.join(root, 'content.js'), 'utf8');
+  for (const pattern of [/导出外链/, /网站推广助手/, /auto-register-qwen-panel/, /TOGGLE_PROMOTE_PANEL/, /function fillInputs/, /MutationObserver/]) {
+    assert.doesNotMatch(content, pattern);
+  }
+  const batchHtml = fs.readFileSync(path.join(root, 'batch.html'), 'utf8');
+  assert.doesNotMatch(batchHtml, /batchAutoOpenPanel|batchAutoGenerate|batchAutoSubmit/);
+});

@@ -90,44 +90,7 @@ const statsTableBody = document.getElementById('statsTableBody');
 const statsTableWrap = document.getElementById('statsTableWrap');
 const statsCountLabel = document.getElementById('statsCountLabel');
 
-// 批量任务设置勾选框
-const batchAutoOpenPanel = document.getElementById('batchAutoOpenPanel');
-const batchAutoGenerate = document.getElementById('batchAutoGenerate');
-const batchAutoSubmit = document.getElementById('batchAutoSubmit');
-
-// ==================== 批量任务设置存储键 ====================
-const BATCH_SETTINGS_KEY = 'batch_task_settings';
-const BATCH_URLS_KEY = 'batch_task_urls';
 const BATCH_DOMAIN_BLACKLIST = ['nsfw-ai.net'];
-
-// 全局勾选框设置的本地存储键
-const BATCH_CHECKBOX_SETTINGS_KEY = 'batch_checkbox_settings';
-
-// 加载全局勾选框设置
-async function loadBatchCheckboxSettings() {
-  const data = await chrome.storage.local.get([BATCH_CHECKBOX_SETTINGS_KEY]);
-  const saved = data[BATCH_CHECKBOX_SETTINGS_KEY] || {};
-  batchAutoOpenPanel.checked = saved.autoOpenPanel !== false;
-  batchAutoGenerate.checked = saved.autoGenerate !== false;
-  batchAutoSubmit.checked = !!saved.autoSubmit;
-}
-
-// 保存全局勾选框设置
-async function saveBatchCheckboxSettings() {
-  return new Promise((resolve) => {
-    const settings = {
-      autoOpenPanel: batchAutoOpenPanel.checked,
-      autoGenerate: batchAutoGenerate.checked,
-      autoSubmit: batchAutoSubmit.checked
-    };
-    chrome.storage.local.set({
-      [BATCH_CHECKBOX_SETTINGS_KEY]: settings
-    }, () => {
-      console.log('[batch] 全局勾选框设置已保存:', settings);
-      resolve();
-    });
-  });
-}
 
 // ==================== 初始化 ====================
 document.addEventListener('DOMContentLoaded', init);
@@ -135,7 +98,6 @@ document.addEventListener('DOMContentLoaded', init);
 async function init() {
   await loadLocalSettings();
   await loadTimeoutSetting();
-  await loadBatchCheckboxSettings(); // 全局记忆的勾选框设置
   bindEvents();
 
   updateUI();
@@ -256,11 +218,6 @@ function bindEvents() {
 
   // 设置
   timeoutInput.addEventListener('change', saveTimeoutSetting);
-
-  // 勾选框设置（全局记忆）
-  batchAutoOpenPanel.addEventListener('change', saveBatchCheckboxSettings);
-  batchAutoGenerate.addEventListener('change', saveBatchCheckboxSettings);
-  batchAutoSubmit.addEventListener('change', saveBatchCheckboxSettings);
 
   // 监听 background 消息（结果回调）
   chrome.runtime.onMessage.addListener((message) => {
@@ -390,9 +347,6 @@ async function startBatch() {
     chrome.storage.local.remove(['batchCtx', 'batchSubmitCtx'], resolve);
   });
 
-  // 保存批量任务设置和 URL 列表到 storage.local，供 content.js 读取
-  await saveBatchTaskSettings();
-
   batchId = generateUUID();
   totalCount = parsedUrls.length;
   successCount = 0;
@@ -412,37 +366,6 @@ async function startBatch() {
 
   // 打开第一个标签页
   openNextTabSync();
-}
-
-// 保存批量任务设置到 storage.local
-async function saveBatchTaskSettings() {
-  return new Promise((resolve) => {
-    const settings = {
-      autoOpenPanel: batchAutoOpenPanel.checked,
-      autoGenerate: batchAutoGenerate.checked,
-      autoSubmit: batchAutoSubmit.checked,
-      savedAt: Date.now()
-    };
-    const urls = parsedUrls.map(item => item.url);
-
-    chrome.storage.local.set({
-      [BATCH_SETTINGS_KEY]: settings,
-      [BATCH_URLS_KEY]: urls
-    }, () => {
-      console.log('[batch] 批量任务设置已保存:', settings, 'URL 数量:', urls.length);
-      resolve();
-    });
-  });
-}
-
-// 清除批量任务设置
-async function clearBatchTaskSettings() {
-  return new Promise((resolve) => {
-    chrome.storage.local.remove([BATCH_SETTINGS_KEY, BATCH_URLS_KEY], () => {
-      console.log('[batch] 批量任务设置已清除');
-      resolve();
-    });
-  });
 }
 
 // 终止标志：stopBatch 后保持 results 但不再处理
@@ -496,7 +419,6 @@ async function stopBatch() {
 async function resumeBatch() {
   if (!validateSettings()) return;
   await saveLocalSettings();
-  await saveBatchTaskSettings();
   console.log('[resumeBatch] 开始恢复处理', { status, currentIndex, totalCount, successCount, failCount });
 
   if (status !== 'terminated') {
@@ -1121,7 +1043,7 @@ function resetBatchState() {
   filterResult.value = 'all';
   filterTimeRange.value = 'all';
   filterKeyword.value = '';
-  const staleKeys = ['batchLocalResults', BATCH_SETTINGS_KEY, BATCH_URLS_KEY, 'batchCtx', 'batchSubmitCtx'];
+  const staleKeys = ['batchLocalResults', 'batch_task_settings', 'batch_task_urls', 'batchCtx', 'batchSubmitCtx'];
   // 加载新 URL 时由 setStatus 直接用新列表的快照覆盖；清空批次时删除快照
   if (parsedUrls.length === 0) staleKeys.push(BATCH_SNAPSHOT_KEY);
   chrome.storage.local.remove(staleKeys);
