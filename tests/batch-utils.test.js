@@ -51,6 +51,8 @@ test('normalizeUrl trims input, adds https, and rejects invalid or unsupported U
   assert.equal(normalizeUrl('HTTP://EXAMPLE.COM'), 'http://example.com/');
   assert.equal(normalizeUrl('example.com:8080/path'), 'https://example.com:8080/path');
   assert.equal(normalizeUrl('localhost:3000/path'), 'https://localhost:3000/path');
+  assert.equal(normalizeUrl('mailto:user@example.com'), null);
+  assert.equal(normalizeUrl('tel:123'), null);
   assert.equal(normalizeUrl('ftp://example.com'), null);
   assert.equal(normalizeUrl('not a URL'), null);
   assert.equal(normalizeUrl(''), null);
